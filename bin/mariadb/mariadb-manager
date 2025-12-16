@@ -1,11 +1,11 @@
 #!/bin/bash
-# ================================
+# ============================
 #  MANAGER BASE DE DONNÉES
-# ================================
+# ============================
 
 # --- CONFIGURATION ---
 SERVICE_NAME="mariadb"
-DIR_CONF="/etc/mysql"
+MARIADB_HOME="/etc/mysql"
 BACKUP_DIR="/var/backups/mariadb-manager"
 LOG_ERROR="/var/log/mysql/error.log"
 CMD_UFW="/usr/sbin/ufw"
@@ -35,18 +35,18 @@ BOLD=$'\033[1m'
 # --- 1. FONCTIONS SYSTÈME DE BASE ---
 
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         return 0
     fi
 
     echo -e "\n${YELLOW}🔒 Authentification requise (Mot de passe Sudo)${NC}"
     read -s -p "Mot de passe : " user_pass
     echo ""
-    
+
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then 
+    if [ $? -eq 0 ]; then
         return 0
-    else 
+    else
         echo -e "${RED}❌ Mot de passe incorrect.${NC}"
         pause
         return 1
@@ -67,22 +67,22 @@ run_sudo() {
     sudo "$@"
 }
 
-run_sudo_silent() { 
-    if sudo -n "$@" 2>/dev/null; then 
-        return 0 
+run_sudo_silent() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
     fi
-    return 1 
+    return 1
 }
 
-pause() { 
+pause() {
     echo ""
-    read -p "Appuyez sur Entrée pour continuer..." 
+    read -p "Appuyez sur Entrée pour continuer..."
 }
 
 ensure_installed() {
     local cmd="$1"
     local pkg="$2"
-    
+
     if ! command -v "$cmd" &> /dev/null; then
         echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
         read -p "Installer '$pkg' maintenant ? (o/n) " i
@@ -93,12 +93,12 @@ ensure_installed() {
                 if run_sudo apt-get install -y "$pkg"; then
                     echo -e "${GREEN}✅ Installé.${NC}"
                     return 0
-                else 
+                else
                     echo -e "${RED}❌ Échec.${NC}"
                     return 1
                 fi
             fi
-        else 
+        else
             echo -e "${RED}❌ Annulé.${NC}"
             return 1
         fi
@@ -112,7 +112,7 @@ server_power_action() {
     if [ "$i" == "confirmer" ]; then
         run_sudo $2
         exit 0
-    else 
+    else
         echo "Annulé."
         pause
     fi
@@ -123,7 +123,7 @@ get_remote_ip_managed() {
         LAST_MOD=$(stat -c %Y "$PUBLIC_IP_CACHE")
         NOW=$(date +%s)
         DIFF=$((NOW - LAST_MOD))
-        if [ $DIFF -lt 3600 ]; then 
+        if [ $DIFF -lt 3600 ]; then
             cat "$PUBLIC_IP_CACHE"
             return
         fi
@@ -139,13 +139,13 @@ get_remote_ip_managed() {
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(get_remote_ip_managed)
-    
+
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-    
+
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-    
+
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
 }
@@ -154,9 +154,12 @@ open_user_shell() {
     if ! ask_sudo_gui; then return; fi
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir."
     trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_KIOSK_MENU=1
+    export SKIP_KIOSK=1
+    cd "MARIADB_HOME" || cd "$HOME"
     bash --login
-    unset SKIP_KIOSK_MENU
+    unset SKIP_KIOSK
+
+
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
@@ -275,14 +278,14 @@ firewall_manager() {
         clear
         if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-        
+
         mapfile -t RULES < <(run_sudo $CMD_UFW status numbered 2>/dev/null | grep "^\[")
         if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
-            for line in "${RULES[@]}"; do 
+            for line in "${RULES[@]}"; do
                 echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
-        
+
         echo "------------------------------------------------"
         echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
         echo -e "  ${GREEN}2.${NC} 🗃️  Ouvrir MariaDB (${DB_PORT}/tcp)"
@@ -353,7 +356,7 @@ get_db_info() {
                     local H=$((DB_UPTIME_RAW%86400/3600))
                     local M=$((DB_UPTIME_RAW%3600/60))
                     DB_UPTIME="${D}j ${H}h ${M}m"
-                else 
+                else
                     DB_UPTIME="N/A"
                 fi
             fi
@@ -385,7 +388,7 @@ menu_service_management() {
             2) if ask_sudo_gui; then run_sudo systemctl start $SERVICE_NAME && echo -e "${GREEN}Démarrage OK.${NC}"; pause; fi ;;
             3) if ask_sudo_gui; then run_sudo systemctl stop $SERVICE_NAME && echo -e "${RED}Arrêté.${NC}"; pause; fi ;;
             4) if ask_sudo_gui; then run_sudo mysql_secure_installation; pause; fi ;;
-            5) if ask_sudo_gui; then run_sudo nano $DIR_CONF/mariadb.conf.d/50-server.cnf; fi ;;
+            5) if ask_sudo_gui; then run_sudo nano $MARIADB_HOME/mariadb.conf.d/50-server.cnf; fi ;;
             r) return ;;
         esac
     done
@@ -405,10 +408,10 @@ manage_databases() {
         echo -e "${BOLD}Bases existantes :${NC}"
         mapfile -t DBS < <(list_databases)
         i=1
-        if [ ${#DBS[@]} -eq 0 ]; then 
+        if [ ${#DBS[@]} -eq 0 ]; then
             echo "  (Aucune DB utilisateur)"
         else
-            for db in "${DBS[@]}"; do 
+            for db in "${DBS[@]}"; do
                 printf "  ${CYAN}%-2d.${NC} %s\n" "$i" "$db"
                 ((i++))
             done
@@ -481,34 +484,34 @@ multi_select_db_backup() {
         echo "----------------------------------------"
         echo -e "  G. Go | T. Tout | N. Rien | r. Retour"
         read -r -p "> " c
-        
+
         [[ "$c" == "r" ]] && break
         [[ "$c" =~ [Tt] ]] && { for i in "${!DBS[@]}"; do S[$i]=1; done; continue; }
         [[ "$c" =~ [Nn] ]] && { for i in "${!DBS[@]}"; do S[$i]=0; done; continue; }
-        
+
         if [[ "$c" =~ [Gg] ]]; then
             DB_LIST=""
             H=0
-            for i in "${!DBS[@]}"; do 
+            for i in "${!DBS[@]}"; do
                 [ "${S[$i]}" -eq 1 ] && { DB_LIST="$DB_LIST ${DBS[$i]}"; H=1; }
             done
-            
+
             [ $H -eq 0 ] && continue
-            
+
             if ask_sudo_gui; then
                 D=$(date +%Y%m%d_%H%M%S)
                 A="$BACKUP_DIR/backup_DBs_$D.sql.gz"
                 echo -e "${CYAN}Sauvegarde des DBs sélectionnées...${NC}"
                 run_sudo mysqldump -u $DB_ROOT_USER $DB_LIST | gzip > "$A"
-                if [ $? -eq 0 ]; then 
+                if [ $? -eq 0 ]; then
                     echo -e "${GREEN}✅ OK: $A${NC}"
-                else 
+                else
                     echo -e "${RED}❌ Échec de la sauvegarde.${NC}"
                 fi
             fi
             pause; break
         fi
-        
+
         [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le $C ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
     done
 }
@@ -551,7 +554,7 @@ backup_menu() {
                        fi
                        if [ $? -eq 0 ]; then echo -e "${GREEN}✅ Restauration terminée.${NC}"; else echo -e "${RED}❌ Erreur de restauration. Vérifiez les logs.${NC}"; fi
                    fi
-               else 
+               else
                    echo "${RED}Fichier non trouvé ou accès refusé.${NC}"
                fi; pause ;;
             r) break ;;
@@ -566,7 +569,7 @@ spawn_restricted_shell() {
     local N="$2"
     [ ! -d "$T" ] && run_sudo mkdir -p "$T"
     cd "$T" || return
-    
+
     echo -e "\n${GREEN}🔒 JAIL $N${NC} (ls, cd, cat, nano, cp, mv, rm, mkdir, pwd)"
     trap 'echo ""' SIGINT
     while true; do
@@ -602,9 +605,9 @@ while true; do
     get_sys_info
     get_db_info
 
-    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then 
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
         FW="${GREEN}● ACTIF${NC}"
-    else 
+    else
         FW="${RED}● INACTIF${NC}"
     fi
 
@@ -617,13 +620,13 @@ while true; do
     printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
     printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
     printf "  🏠 LAN: %-15s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
-    
+
     echo -e "$SEP"
-    
+
     # --- INFO SERVICE ---
     printf "  💾 MariaDB : %-16b | 🛡️  Pare-feu : %s\n" "$DB_STATUS" "$FW"
     printf "  ℹ️  Version : %-16s | ⚓ Port     : %s\n" "${CYAN}$DB_VERSION${NC}" "${YELLOW}$DB_PORT${NC}"
-    
+
     echo -e "$SEP"
 
     # --- MENU : SERVICE ---
@@ -637,7 +640,7 @@ while true; do
     echo -e "    ${GREEN}3.${NC} 🗃️  Gestion des Bases de Données (CRUD)"
     echo -e "    ${GREEN}4.${NC} 💾 Sauvegardes & Restauration"
     echo ""
-    
+
     # --- MENU : OUTILS ---
     echo -e " ${BOLD}${CYAN}🛠️  OUTILS & SYSTÈME${NC}"
     echo -e "    ${GREEN}5.${NC} 🧱 Pare-feu (UFW) & Réseau"
@@ -652,7 +655,7 @@ while true; do
     echo -e "    ${RED}9.${NC} ♻️  Redémarrer le serveur"
 
     echo -e "$SEP"
-    
+
     # --- PIED DE PAGE ---
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Shell   |   [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
@@ -667,7 +670,7 @@ while true; do
                run_sudo tail -f "$LOG_ERROR"
            fi
            trap '' SIGINT SIGQUIT SIGTSTP
-           pause 
+           pause
            ;;
         3) manage_databases ;;
         4) backup_menu ;;
@@ -675,7 +678,7 @@ while true; do
         6)
            echo "1. Config MariaDB | 2. Dossier Backups"
            read -p "> " j
-           [ "$j" == "1" ] && spawn_restricted_shell "$DIR_CONF" "CONF DB"
+           [ "$j" == "1" ] && spawn_restricted_shell "$MARIADB_HOME" "CONF DB"
            [ "$j" == "2" ] && spawn_restricted_shell "$BACKUP_DIR" "BACKUPS"
            ;;
         7) menu_system_update ;;
