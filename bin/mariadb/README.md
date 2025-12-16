@@ -8,6 +8,8 @@ Pour que le Dashboard puisse s'afficher instantanément sans demander de mot de 
 
 **Le blocage se produit lorsque le script essaie d'exécuter `sudo mysql -u root -e "..."` pour récupérer l'état de la base de données.**
 
+**Le blocage se produit aussi lorsque le script essaie d'exécuter `sudo ufw status"` pour récupérer l'état du pare feu.**
+
 Ajoutez ces règles (en remplaçant `%grp_utilisateur_linux-ssh` par votre groupe ou `votre_utilisateur`) à votre fichier `/etc/sudoers.d/`:
 
 ```bash
