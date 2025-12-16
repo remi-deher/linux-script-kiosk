@@ -1,14 +1,14 @@
 #!/bin/bash
-
-# ====================================
+# ================================
 #  MANAGER BASE DE DONNÉES
-# ====================================
+# ================================
 
 # --- CONFIGURATION ---
 SERVICE_NAME="mariadb"
 DIR_CONF="/etc/mysql"
 BACKUP_DIR="/var/backups/mariadb-manager"
 LOG_ERROR="/var/log/mysql/error.log"
+CMD_UFW="/usr/sbin/ufw"
 
 DB_ROOT_USER="root"
 
@@ -65,6 +65,13 @@ run_sudo() {
 
     if ! ask_sudo_gui; then return 1; fi
     sudo "$@"
+}
+
+run_sudo_silent() { 
+    if sudo -n "$@" 2>/dev/null; then 
+        return 0 
+    fi
+    return 1 
 }
 
 pause() { 
@@ -133,7 +140,6 @@ get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(get_remote_ip_managed)
     
-    # OS & CPU Info (Ajouté pour cohérence avec le menu)
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
     
@@ -211,17 +217,18 @@ menu_system_update() {
 }
 
 
-# --- 3. UFW & RESEAU ---
+# --- 3. UFW & RESEAU UNIFIÉ (CORRIGÉ) ---
 
 firewall_checkbox_delete() {
-    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
+    # Utilisation explicite de CMD_UFW sans vérification préalable bloquante
+    mapfile -t RULES < <(run_sudo $CMD_UFW status numbered 2>/dev/null | grep "^\[")
+    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle ou UFW inactif."; pause; return; fi
 
     declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
 
     while true; do
         clear
-        echo -e "${RED}${BOLD}SUPPRESSION UFW (Cochez pour supprimer)${NC}"
+        echo -e "${RED}${BOLD}SUPPRESSION RÈGLES (Cochez pour supprimer)${NC}"
         for i in "${!RULES[@]}"; do
             NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
             DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
@@ -229,9 +236,8 @@ firewall_checkbox_delete() {
             printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
         done
         echo "------------------------------------------------"
-        echo -e "  [Num] Basculer coche | [a] Tout | [n] Rien"
-        echo -e "  [v]   VALIDER SUPPRESSION"
-        echo -e "  [q]   Retour"
+        echo -e "  [Num] Basculer | [a] Tout | [n] Rien"
+        echo -e "  [v]   VALIDER | [r] Retour"
         read -r -p "> " k
 
         if [[ "$k" =~ ^[0-9]+$ ]]; then
@@ -252,64 +258,49 @@ firewall_checkbox_delete() {
             if [ ${#DELS[@]} -gt 0 ]; then
                 if ask_sudo_gui; then
                     SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
-                    for n in $SORTED; do
-                        echo "Suppression règle #$n..."
-                        yes | sudo ufw delete "$n" >/dev/null
-                    done
-                    echo -e "${GREEN}Terminé.${NC}"
-                    pause; break
+                    for n in $SORTED; do echo "Suppression règle #$n..."; yes | sudo $CMD_UFW delete "$n" >/dev/null; done
+                    echo -e "${GREEN}Terminé.${NC}"; pause; break
                 fi
-            else
-                echo "Aucune sélection."
-                pause
-            fi
-        elif [ "$k" == "q" ]; then 
-            break
-        elif [ "$k" == "a" ]; then 
-            for i in "${!RULES[@]}"; do SEL[$i]=true; done
-        elif [ "$k" == "n" ]; then 
-            for i in "${!RULES[@]}"; do SEL[$i]=false; done
+            else echo "Aucune sélection."; pause; fi
+        elif [ "$k" == "r" ]; then break
+        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
+        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
         fi
     done
 }
 
-manage_ufw_clean() {
-    if ! ensure_installed "ufw" "ufw"; then return; fi
+firewall_manager() {
+    # Suppression du ensure_installed bloquant pour s'aligner sur zoraxy-manager
     while true; do
         clear
-        if run_sudo ufw status 2>/dev/null | grep -q "active"; then 
-            ST="${GREEN}ACTIF${NC}"
-        else 
-            ST="${RED}INACTIF${NC}"
+        if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
+        echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
+        
+        mapfile -t RULES < <(run_sudo $CMD_UFW status numbered 2>/dev/null | grep "^\[")
+        if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
+            for line in "${RULES[@]}"; do 
+                echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
+            done
         fi
         
-        echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"
-
-        if [[ "$ST" == *ACTIF* ]]; then
-            echo "Règles actuelles :"
-            run_sudo ufw status numbered | grep "^\["
-        fi
-
-        echo "----------------------"
+        echo "------------------------------------------------"
         echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
         echo -e "  ${GREEN}2.${NC} 🗃️  Ouvrir MariaDB (${DB_PORT}/tcp)"
         echo -e "  ${GREEN}3.${NC} ➕ Ouvrir Port Manuel"
         echo -e "  ${GREEN}4.${NC} ⚡ Activer UFW (Enable)"
         echo -e "  ${RED}5.${NC} 🗑️  Supprimer des règles (Sélection)"
         echo -e "  ${RED}6.${NC} 🛑 Désactiver UFW (Disable)"
-        echo "----------------------"
-        echo -e "  ${RED}0.${NC} Retour"
-        read -r -p "> " u
-        case "$u" in
-            1) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "${GREEN}SSH ouvert.${NC}"; pause; fi ;;
-            2) if ask_sudo_gui; then run_sudo ufw allow "$DB_PORT"/tcp; echo "${GREEN}MariaDB ($DB_PORT) ouvert.${NC}"; pause; fi ;;
-            3) 
-                read -p "Port (ex: 8080) : " p
-                [ -n "$p" ] && { if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi; } 
-                ;;
-            4) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
+        echo "------------------------------------------------"
+        echo -e "  ${RED}0.${NC} 🔙 Retour au menu principal"
+        read -r -p "Choix > " c
+
+        case "$c" in
+            1) if ask_sudo_gui; then run_sudo $CMD_UFW allow 22/tcp; echo "OK"; pause; fi ;;
+            2) if ask_sudo_gui; then run_sudo $CMD_UFW allow "$DB_PORT"/tcp; echo "OK"; pause; fi ;;
+            3) read -p "Port : " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo $CMD_UFW allow "$p"; pause; fi ;;
+            4) if ask_sudo_gui; then run_sudo $CMD_UFW enable; pause; fi ;;
             5) firewall_checkbox_delete ;;
-            6) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
+            6) if ask_sudo_gui; then run_sudo $CMD_UFW disable; pause; fi ;;
             0) return ;;
         esac
     done
@@ -345,7 +336,6 @@ get_db_info() {
         DB_STATUS="${GREEN}● ON${NC}"
 
         if check_mariadb_installed; then
-            # Récupération ordonnée pour éviter les erreurs de parsing
             local INFOS=$(run_db_command "(SELECT VARIABLE_VALUE, 1 AS ord FROM information_schema.global_variables WHERE VARIABLE_NAME = 'version')
                                          UNION ALL
                                          (SELECT VARIABLE_VALUE, 2 AS ord FROM information_schema.global_variables WHERE VARIABLE_NAME = 'port')
@@ -354,7 +344,6 @@ get_db_info() {
                                          ORDER BY ord;" 2>/dev/null)
 
             if [ $? -eq 0 ] && [ -n "$INFOS" ]; then
-                # On lit la première colonne en sautant l'entête
                 DB_VERSION=$(echo "$INFOS" | tail -n +2 | awk 'NR==1{print $1}')
                 DB_PORT=$(echo "$INFOS" | tail -n +2 | awk 'NR==2{print $1}')
                 DB_UPTIME_RAW=$(echo "$INFOS" | tail -n +2 | awk 'NR==3{print $1}')
@@ -613,7 +602,7 @@ while true; do
     get_sys_info
     get_db_info
 
-    if run_sudo ufw status 2>/dev/null | grep -q "Status: active"; then 
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then 
         FW="${GREEN}● ACTIF${NC}"
     else 
         FW="${RED}● INACTIF${NC}"
@@ -682,7 +671,7 @@ while true; do
            ;;
         3) manage_databases ;;
         4) backup_menu ;;
-        5) manage_ufw_clean ;;
+        5) firewall_manager ;;
         6)
            echo "1. Config MariaDB | 2. Dossier Backups"
            read -p "> " j
@@ -694,5 +683,6 @@ while true; do
         9) server_power_action "REDÉMARRER" "reboot" ;;
         admin) open_user_shell ;;
         exit|q) kill -9 $PPID 2>/dev/null; exit 0 ;;
+        *) echo "Choix invalide"; sleep 1 ;;
     esac
 done
