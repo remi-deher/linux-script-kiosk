@@ -1,7 +1,7 @@
 #!/bin/bash
-# ==========================================
+# =============================
 #  MANAGER ZORAXY
-# ==========================================
+# =============================
 
 # --- CONFIGURATION ---
 SERVICE_NAME="zoraxy"
@@ -430,48 +430,87 @@ menu_daemon_modern() {
     done
 }
 
+firewall_checkbox_delete() {
+    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
+    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
+
+    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
+
+    while true; do
+        clear
+        echo -e "${RED}${BOLD}SUPPRESSION RÈGLES (Cochez pour supprimer)${NC}"
+        for i in "${!RULES[@]}"; do
+            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+            DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
+            if [ "${SEL[$i]}" == "true" ]; then M="${RED}[X]${NC}"; else M="${GREEN}[ ]${NC}"; fi
+            printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
+        done
+        echo "------------------------------------------------"
+        echo -e "  [Num] Basculer | [a] Tout | [n] Rien"
+        echo -e "  [v]   VALIDER | [r] Retour"
+        read -r -p "> " k
+
+        if [[ "$k" =~ ^[0-9]+$ ]]; then
+            for i in "${!RULES[@]}"; do
+                rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                if [ "$rn" == "$k" ]; then
+                    if [ "${SEL[$i]}" == "true" ]; then SEL[$i]=false; else SEL[$i]=true; fi
+                fi
+            done
+        elif [ "$k" == "v" ]; then
+            declare -a DELS
+            for i in "${!RULES[@]}"; do
+                if [ "${SEL[$i]}" == "true" ]; then
+                    rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                    DELS+=("$rn")
+                fi
+            done
+            if [ ${#DELS[@]} -gt 0 ]; then
+                if ask_sudo_gui; then
+                    SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
+                    for n in $SORTED; do echo "Suppression règle #$n..."; yes | sudo ufw delete "$n" >/dev/null; done
+                    echo -e "${GREEN}Terminé.${NC}"; pause; break
+                fi
+            else echo "Aucune sélection."; pause; fi
+        elif [ "$k" == "r" ]; then break
+        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
+        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
+        fi
+    done
+}
+
 firewall_manager() {
     while true; do
         clear
-        if run_sudo_silent ufw status | grep -q "active"; then 
-            ST="${GREEN}ACTIF${NC}"
-        else 
-            ST="${RED}INACTIF${NC}"
-        fi
+        if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
+        echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
         
-        echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"
         mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-        
-        if [ ${#RULES[@]} -eq 0 ]; then 
-            echo " (Vide)"
-        else 
-            for l in "${RULES[@]}"; do 
-                echo "$l" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
+        if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
+            for line in "${RULES[@]}"; do 
+                echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
         
         echo "------------------------------------------------"
-        echo "1. Ouvrir Port | 2. Supprimer | 3. ON/OFF | r. Retour"
-        read -r -p "> " c
-        
-        case "$c" in 
-            1) 
-                read -p "Port: " p
-                [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi 
-                ;;
-            2) 
-                echo "sudo ufw delete <num>"
-                pause 
-                ;;
-            3) 
-                if [[ "$ST" == *"ACTIF"* ]]; then 
-                    run_sudo ufw disable
-                else 
-                    run_sudo ufw enable
-                fi
-                pause 
-                ;;
-            r) return ;;
+        echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
+        echo -e "  ${GREEN}2.${NC} 🔌 Ouvrir Port Zoraxy ($CURRENT_PORT)"
+        echo -e "  ${GREEN}3.${NC} ➕ Ouvrir Port Manuel"
+        echo -e "  ${GREEN}4.${NC} ⚡ Activer UFW (Enable)"
+        echo -e "  ${RED}5.${NC} 🗑️  Supprimer des règles (Sélection)"
+        echo -e "  ${RED}6.${NC} 🛑 Désactiver UFW (Disable)"
+        echo "------------------------------------------------"
+        echo -e "  ${RED}0.${NC} 🔙 Retour au menu principal"
+        read -r -p "Choix > " c
+
+        case "$c" in
+            1) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "OK"; pause; fi ;;
+            2) if ask_sudo_gui; then run_sudo ufw allow "$CURRENT_PORT"/tcp; echo "OK"; pause; fi ;;
+            3) read -p "Port : " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi ;;
+            4) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
+            5) firewall_checkbox_delete ;;
+            6) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
+            0) return ;;
         esac
     done
 }
@@ -568,7 +607,6 @@ spawn_restricted_shell() {
 }
 
 # --- 4. BOUCLE PRINCIPALE ---
-# On définit un séparateur standard coloré pour uniformiser
 SEP="${BLUE}------------------------------------------------${NC}"
 SEP_RED="${RED}------------------------------------------------${NC}"
 
