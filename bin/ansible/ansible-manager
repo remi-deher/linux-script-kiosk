@@ -1,12 +1,12 @@
 #!/bin/bash
-# ================================
-#  MANAGER ANSIBLE
-# ================================
+# =======================================================
+#  MANAGER ANSIBLE - VERSION FINALE (OPTIMISÉE)
+# =======================================================
 
 # --- CONFIGURATION ---
-export ANSIBLE_ROOT_RAW="${ANSIBLE_ROOT:-$HOME/ansible}"
-export ANSIBLE_ROOT=$(readlink -f "$ANSIBLE_ROOT_RAW")
-export SCRIPTS_DIR="$ANSIBLE_ROOT/scripts"
+export ANSIBLE_HOME_RAW="${ANSIBLE_HOME:-$HOME/ansible}"
+export ANSIBLE_HOME=$(readlink -f "$ANSIBLE_HOME_RAW")
+export SCRIPTS_DIR="$ANSIBLE_HOME/scripts"
 SERVICE_NAME="cron"
 CMD_UFW="/usr/sbin/ufw"
 
@@ -25,95 +25,95 @@ BOLD=$'\033[1m'
 # --- GESTION SUDO ---
 
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         return 0
     fi
-    
+
     echo -e "\n${YELLOW}🔒 Authentification requise${NC}"
     read -s -p "Mot de passe : " user_pass
     echo ""
-    
+
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then 
+    if [ $? -eq 0 ]; then
         return 0
-    else 
+    else
         echo -e "${RED}❌ Incorrect.${NC}"
         pause
         return 1
     fi
 }
 
-run_sudo() { 
-    if sudo -n "$@" 2>/dev/null; then 
-        return 0 
+run_sudo() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
     fi
-    
-    if sudo -n true 2>/dev/null; then 
+
+    if sudo -n true 2>/dev/null; then
         sudo "$@" 2>/dev/null
         return $?
     fi
-    
-    if ! ask_sudo_gui; then 
+
+    if ! ask_sudo_gui; then
         return 1
     fi
-    sudo "$@" 
+    sudo "$@"
 }
 
-run_sudo_silent() { 
-    if sudo -n "$@" 2>/dev/null; then 
-        return 0 
+run_sudo_silent() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
     fi
-    return 1 
+    return 1
 }
 
-pause() { 
+pause() {
     echo ""
-    read -p "Entrée pour continuer..." 
+    read -p "Entrée pour continuer..."
 }
 
-server_power_action() { 
+server_power_action() {
     local a="$1"
     local c="$2"
     local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g')
-    
+
     echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"
     read -p "Tapez '$cw' : " i
-    
-    if [ "$i" == "$cw" ]; then 
+
+    if [ "$i" == "$cw" ]; then
         run_sudo $c
         exit 0
-    else 
+    else
         echo "Annulé."
         pause
-    fi 
+    fi
 }
 
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
-    
+
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-    
+
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-    
+
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
-    
+
     APP_VER=$(ansible --version 2>/dev/null | head -n1 | awk '{print $NF}' | tr -d ']')
     PY_VER=$(python3 --version 2>/dev/null | awk '{print $2}')
 }
 
-open_user_shell() { 
+open_user_shell() {
     if ! ask_sudo_gui; then return; fi
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"
     trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_ANSIBLE_MENU=1
-    cd "$ANSIBLE_ROOT" || cd "$HOME"
+    export SKIP_KIOSK=1
+    cd "$ANSIBLE_HOME" || cd "$HOME"
     bash --login
-    unset SKIP_ANSIBLE_MENU
+    unset SKIP_KIOSK
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
@@ -121,12 +121,12 @@ spawn_restricted_shell() {
     local TD=$(readlink -f "$1")
     local SN="$2"
     [ ! -d "$TD" ] && mkdir -p "$TD"
-    
+
     echo -e "\n${GREEN}🔒 JAIL $SN${NC}"
     local OH="$HOME"
-    
+
     bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { local c=\$(pwd -P); if [[ \"\$c\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'")
-    
+
     export HOME="$OH"
     trap '' SIGINT SIGQUIT SIGTSTP
 }
@@ -134,50 +134,50 @@ spawn_restricted_shell() {
 run_tool() {
     local script_path="$1"
     local require_sudo="$2"
-    export ANSIBLE_ROOT
-    
+    export ANSIBLE_HOME
+
     if [ -f "$script_path" ]; then
         [ ! -x "$script_path" ] && chmod +x "$script_path"
-        
-        if [ "$require_sudo" == "true" ]; then 
+
+        if [ "$require_sudo" == "true" ]; then
             if ask_sudo_gui; then sudo -E "$script_path"; fi
-        else 
+        else
             trap - SIGINT SIGQUIT SIGTSTP
             "$script_path"
             trap '' SIGINT SIGQUIT SIGTSTP
         fi
-    else 
+    else
         echo -e "${RED}Script introuvable ($script_path)${NC}"
         pause
     fi
 }
 
 menu_system_update() {
-    while true; do 
+    while true; do
         clear
         echo -e "${BLUE}=== MISE À JOUR ===${NC}"
         echo -e "1. Update | 2. Clean | 3. Dist | r. Retour"
         read -r -p "> " u
-        
-        case "$u" in 
-            1) 
-                if ask_sudo_gui; then 
+
+        case "$u" in
+            1)
+                if ask_sudo_gui; then
                     sudo apt update && sudo apt upgrade -y
                     pause
-                fi 
-                ;; 
-            2) 
-                if ask_sudo_gui; then 
+                fi
+                ;;
+            2)
+                if ask_sudo_gui; then
                     sudo apt autoremove -y
                     pause
-                fi 
-                ;; 
-            3) 
-                if ask_sudo_gui; then 
+                fi
+                ;;
+            3)
+                if ask_sudo_gui; then
                     sudo apt dist-upgrade -y
                     pause
-                fi 
-                ;; 
+                fi
+                ;;
             r) return ;;
         esac
     done
@@ -239,14 +239,14 @@ firewall_manager() {
         clear
         if run_sudo_silent $CMD_UFW status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-        
+
         mapfile -t RULES < <(run_sudo $CMD_UFW status numbered | grep "^\[")
         if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
-            for line in "${RULES[@]}"; do 
+            for line in "${RULES[@]}"; do
                 echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
-        
+
         echo "------------------------------------------------"
         echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
         echo -e "  ${GREEN}2.${NC} ➕ Ouvrir Port Manuel"
@@ -275,16 +275,16 @@ SEP_RED="${RED}------------------------------------------------${NC}"
 while true; do
     clear
     get_sys_info
-    
-    if systemctl is-active --quiet cron; then 
+
+    if systemctl is-active --quiet cron; then
         SX="${GREEN}● ACTIF${NC}"
-    else 
+    else
         SX="${RED}● OFF${NC}"
     fi
-    
-    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then 
+
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
         FW="${GREEN}● ACTIF${NC}"
-    else 
+    else
         FW="${RED}● INACTIF${NC}"
     fi
 
@@ -297,12 +297,12 @@ while true; do
     printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
     printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
     printf "  🏠 LAN: %-15s | 🐍 Python: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PY_VER${NC}"
-    
+
     echo -e "$SEP"
 
     # --- INFO SERVICE ---
     printf "  ⏰ Automate : %-11b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
-    printf "  ℹ️  Ansible  : %-11s | 📁 Racine   : %s\n" "${CYAN}$APP_VER${NC}" "$(basename "$ANSIBLE_ROOT")"
+    printf "  ℹ️  Ansible  : %-11s | 📁 Racine   : %s\n" "${CYAN}$APP_VER${NC}" "$(basename "$ANSIBLE_HOME")"
 
     echo -e "$SEP"
 
@@ -338,18 +338,18 @@ while true; do
 
     case "$choice" in
         1) run_tool "$SCRIPTS_DIR/launcher.sh" "false" ;;
-        2) 
-            if [ -f "$SCRIPTS_DIR/manage_ansible_cron.sh" ]; then 
+        2)
+            if [ -f "$SCRIPTS_DIR/manage_ansible_cron.sh" ]; then
                 run_tool "$SCRIPTS_DIR/manage_ansible_cron.sh" "true"
-            else 
+            else
                 run_tool "$SCRIPTS_DIR/manage_cron.sh" "true"
-            fi 
+            fi
             ;;
         3) run_tool "$SCRIPTS_DIR/vault_manager.sh" "false" ;;
         4) run_tool "$SCRIPTS_DIR/inventory_tool.sh" "false" ;;
-        5) spawn_restricted_shell "$ANSIBLE_ROOT" "ANSIBLE" ;;
-        6) 
-            [ -f "$SCRIPTS_DIR/create_role.sh" ] && run_tool "$SCRIPTS_DIR/create_role.sh" "false" || { echo "Script manquant"; pause; } 
+        5) spawn_restricted_shell "$ANSIBLE_HOME" "ANSIBLE" ;;
+        6)
+            [ -f "$SCRIPTS_DIR/create_role.sh" ] && run_tool "$SCRIPTS_DIR/create_role.sh" "false" || { echo "Script manquant"; pause; }
             ;;
         7) firewall_manager ;;
         8) menu_system_update ;;
