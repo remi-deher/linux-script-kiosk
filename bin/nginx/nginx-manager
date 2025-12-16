@@ -569,7 +569,7 @@ open_user_shell() {
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"
     trap - SIGINT SIGQUIT SIGTSTP
     export SKIP_KIOSK=1
-    cd "NGINX_HOME" || cd "$HOME"
+    cd "$NGINX_HOME" || cd "$HOME"
     bash --login
     unset SKIP_KIOSK
     trap '' SIGINT SIGQUIT SIGTSTP
