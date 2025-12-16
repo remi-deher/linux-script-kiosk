@@ -1,18 +1,18 @@
 #!/bin/bash
-# ================================
-#  MANAGER SERVEUR WEB
-# ================================
+# =======================================================
+#  MANAGER SERVEUR WEB - VERSION FINALE (OPTIMISÉE)
+# =======================================================
 
 # --- CONFIGURATION ---
 DIR_WEB="/var/www"
-DIR_NGINX="/etc/nginx"
+NGINX_HOME="/etc/nginx"
 DIR_PHP="/etc/php"
 BACKUP_DIR="/var/backups/nginx-manager"
 LOG_ACCESS="/var/log/nginx/access.log"
 LOG_ERROR="/var/log/nginx/error.log"
 SERVICE_NAME="nginx"
-SITES_AVAIL="$DIR_NGINX/sites-available"
-SITES_ENAB="$DIR_NGINX/sites-enabled"
+SITES_AVAIL="$NGINX_HOME/sites-available"
+SITES_ENAB="$NGINX_HOME/sites-enabled"
 
 # Cache & Config
 PUBLIC_IP_CACHE="/tmp/nginx_public_ip"
@@ -32,17 +32,17 @@ BOLD=$'\033[1m'
 
 # --- 1. GESTION SUDO ---
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         return 0
     fi
     echo -e "\n${YELLOW}🔒 Authentification requise${NC}"
     read -s -p "Mot de passe : " user_pass
     echo ""
-    
+
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then 
+    if [ $? -eq 0 ]; then
         return 0
-    else 
+    else
         echo -e "${RED}❌ Incorrect.${NC}"
         pause
         return 1
@@ -50,10 +50,10 @@ ask_sudo_gui() {
 }
 
 run_sudo() {
-    if sudo -n "$@" 2>/dev/null; then 
+    if sudo -n "$@" 2>/dev/null; then
         return 0
     fi
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         sudo "$@"
         return $?
     fi
@@ -61,16 +61,16 @@ run_sudo() {
     sudo "$@"
 }
 
-run_sudo_silent() { 
-    if sudo -n "$@" 2>/dev/null; then 
-        return 0 
+run_sudo_silent() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
     fi
-    return 1 
+    return 1
 }
 
-pause() { 
+pause() {
     echo ""
-    read -p "Appuyez sur Entrée pour continuer..." 
+    read -p "Appuyez sur Entrée pour continuer..."
 }
 
 ensure_installed() {
@@ -80,11 +80,11 @@ ensure_installed() {
         echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
         read -p "Installer '$pkg' ? (o/n) " i
         if [[ "$i" == "o" ]]; then
-            if ask_sudo_gui; then 
+            if ask_sudo_gui; then
                 run_sudo apt-get update -qq
                 run_sudo apt-get install -y "$pkg"
             fi
-        else 
+        else
             return 1
         fi
     fi
@@ -97,10 +97,10 @@ server_power_action() {
     local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g')
     echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"
     read -p "Tapez '$cw' pour exécuter : " i
-    if [ "$i" == "$cw" ]; then 
+    if [ "$i" == "$cw" ]; then
         run_sudo $c
         exit 0
-    else 
+    else
         echo "Annulé."
         pause
     fi
@@ -108,19 +108,19 @@ server_power_action() {
 
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
-    if [ -f "$PUBLIC_IP_CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PUBLIC_IP_CACHE") )) -lt 3600 ]; then 
+    if [ -f "$PUBLIC_IP_CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PUBLIC_IP_CACHE") )) -lt 3600 ]; then
         PUBLIC_IP=$(cat "$PUBLIC_IP_CACHE")
     else
         PUBLIC_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
         [[ "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && echo "$PUBLIC_IP" > "$PUBLIC_IP_CACHE" || PUBLIC_IP="N/A"
     fi
-    
+
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-    
+
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-    
+
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
 
@@ -156,16 +156,16 @@ refresh_vhost_list() {
             bn_noext="${bn%.*}"
 
             # État
-            if ls "$SITES_ENAB/$bn"* 1> /dev/null 2>&1; then 
+            if ls "$SITES_ENAB/$bn"* 1> /dev/null 2>&1; then
                 st="${GREEN}● ON${NC}"
-            else 
+            else
                 st="${RED}● OFF${NC}"
             fi
 
             # Lecture contenu (Optimisée)
-            if [ -r "$f" ]; then 
+            if [ -r "$f" ]; then
                 content=$(cat "$f" 2>/dev/null)
-            else 
+            else
                 content=$(sudo cat "$f" 2>/dev/null)
             fi
 
@@ -186,10 +186,10 @@ create_vhost_wizard() {
     echo -e "\n${GREEN}➕ AJOUTER UN NOUVEAU SITE${NC}"
     read -p "Nom de domaine (ex: site.lan) : " domain
     [ -z "$domain" ] && return
-    
+
     read -p "Port d'écoute (ex: 80) : " port
     port=${port:-80}
-    
+
     read -p "Dossier racine (défaut: $DIR_WEB/$domain) : " docroot
     docroot=${docroot:-"$DIR_WEB/$domain"}
 
@@ -282,10 +282,10 @@ action_edit_vhost() {
         if ask_sudo_gui; then
             run_sudo nano "$f"
             echo "Vérification..."
-            if run_sudo nginx -t; then 
+            if run_sudo nginx -t; then
                 run_sudo systemctl reload nginx
                 echo "Config rechargée."
-            else 
+            else
                 echo "${RED}Erreur syntaxe!${NC}"
             fi
             pause
@@ -372,14 +372,14 @@ firewall_manager() {
         clear
         if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-        
+
         mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
         if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
-            for line in "${RULES[@]}"; do 
+            for line in "${RULES[@]}"; do
                 echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
-        
+
         echo "------------------------------------------------"
         echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
         echo -e "  ${GREEN}2.${NC} 🌍 Ouvrir HTTP/HTTPS (80, 443)"
@@ -407,36 +407,36 @@ deploy_from_github() {
     clear
     echo -e "${BLUE}--- DÉPLOIEMENT GITHUB ---${NC}"
     ensure_installed "git" "git" || return
-    
+
     read -p "URL dépôt : " repo_url
     [ -z "$repo_url" ] && return
-    
+
     echo -e "Dest: ${CYAN}$DIR_WEB/<dossier>${NC}"
     read -p "Nom dossier : " folder_name
     [ -z "$folder_name" ] && return
-    
+
     TARGET="$DIR_WEB/$folder_name"
     if [ -d "$TARGET" ]; then
         read -p "Dossier existe. Supprimer ? (o/n) " d
         [[ "$d" == "o" ]] && run_sudo rm -rf "$TARGET" || return
     fi
-    
-    if run_sudo git clone "$repo_url" "$TARGET"; then 
+
+    if run_sudo git clone "$repo_url" "$TARGET"; then
         echo "${GREEN}Cloné.${NC}"
-    else 
+    else
         echo "${RED}Erreur.${NC}"
         pause
         return
     fi
-    
+
     if [ -f "$TARGET/composer.json" ]; then
         read -p "Installer composer ? (o/n) " dc
         [[ "$dc" == "o" ]] && ensure_installed "composer" "composer" && run_sudo bash -c "cd $TARGET && export COMPOSER_ALLOW_SUPERUSER=1; composer install --no-interaction --optimize-autoloader"
     fi
-    
+
     run_sudo chown -R www-data:www-data "$TARGET"
     run_sudo chmod -R 755 "$TARGET"
-    
+
     read -p "Créer Vhost ? (o/n) " cv
     [[ "$cv" == "o" ]] && create_vhost_wizard
     pause
@@ -446,37 +446,37 @@ multi_select_backup() {
     local T="$1"
     local L="$2"
     [ ! -d "$T" ] && return
-    
+
     run_sudo mkdir -p "$BACKUP_DIR"
     shopt -s nullglob
     local I=("$T"/*)
     shopt -u nullglob
     [ ${#I[@]} -eq 0 ] && return
-    
+
     declare -A S
     for i in "${!I[@]}"; do S[$i]=0; done
-    
+
     while true; do
         clear; echo -e "${BLUE}BACKUP : $L${NC}"
-        for i in "${!I[@]}"; do 
+        for i in "${!I[@]}"; do
             [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"
             printf "  %s %2d. %s\n" "$M" $((i+1)) "$(basename "${I[$i]}")"
         done
-        
+
         echo "  G. Go | T. Tout | N. Rien | r. Retour"
         read -r -p "> " c
-        
+
         [[ "$c" == "r" ]] && break
         [[ "$c" =~ [Tt] ]] && { for i in "${!I[@]}"; do S[$i]=1; done; continue; }
         [[ "$c" =~ [Nn] ]] && { for i in "${!I[@]}"; do S[$i]=0; done; continue; }
-        
+
         if [[ "$c" =~ [Gg] ]]; then
             F=""
             H=0
-            for i in "${!I[@]}"; do 
+            for i in "${!I[@]}"; do
                 [ "${S[$i]}" -eq 1 ] && { F="$F $(basename "${I[$i]}")"; H=1; }
             done
-            
+
             [ $H -eq 0 ] && continue
             D=$(date +%Y%m%d_%H%M%S)
             A="backup_${L}_$D.tar.gz"
@@ -486,7 +486,7 @@ multi_select_backup() {
             pause
             break
         fi
-        
+
         [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le ${#I[@]} ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
     done
 }
@@ -497,47 +497,47 @@ backup_menu() {
         echo -e "  1. Complète | 2. Config Nginx | 3. Data Web | 4. Vhosts | 5. Voir | 6. Restaurer Vhost | r. Retour"
         read -r -p "> " c
         D=$(date +%Y%m%d_%H%M%S)
-        
+
         case "$c" in
-            1) 
-                if ask_sudo_gui; then 
+            1)
+                if ask_sudo_gui; then
                     run_sudo mkdir -p "$BACKUP_DIR"
-                    run_sudo tar -czf "$BACKUP_DIR/FULL_SERVER_$D.tar.gz" "$DIR_NGINX" "$DIR_WEB"
+                    run_sudo tar -czf "$BACKUP_DIR/FULL_SERVER_$D.tar.gz" "$NGINX_HOME" "$DIR_WEB"
                     echo "OK"
                     pause
-                fi 
+                fi
                 ;;
-            2) 
-                if ask_sudo_gui; then 
+            2)
+                if ask_sudo_gui; then
                     run_sudo mkdir -p "$BACKUP_DIR"
-                    run_sudo tar -czf "$BACKUP_DIR/NGINX_CONF_$D.tar.gz" "$DIR_NGINX"
+                    run_sudo tar -czf "$BACKUP_DIR/NGINX_CONF_$D.tar.gz" "$NGINX_HOME"
                     echo "OK"
                     pause
-                fi 
+                fi
                 ;;
             3) multi_select_backup "$DIR_WEB" "WebData" ;;
             4) multi_select_backup "$SITES_AVAIL" "Vhosts" ;;
             5) ls -lh "$BACKUP_DIR" 2>/dev/null; pause ;;
-            6) 
+            6)
                 shopt -s nullglob
                 files=("$BACKUP_DIR"/deleted_vhost_*.tar.gz)
                 shopt -u nullglob
-                
-                if [ ${#files[@]} -eq 0 ]; then 
+
+                if [ ${#files[@]} -eq 0 ]; then
                     echo "Rien."
                     pause
                     continue
                 fi
-                
-                for i in "${!files[@]}"; do 
+
+                for i in "${!files[@]}"; do
                     echo "$((i+1)). $(basename "${files[$i]}")"
                 done
-                
+
                 read -p "Num > " n
-                if [[ "$n" =~ ^[0-9]+$ ]]; then 
+                if [[ "$n" =~ ^[0-9]+$ ]]; then
                     sel="${files[$((n-1))]}"
                     run_sudo tar -xzf "$sel" -C "$SITES_AVAIL" && echo "Restauré" && pause
-                fi 
+                fi
                 ;;
             r) break ;;
         esac
@@ -549,28 +549,29 @@ logs_menu() {
         clear
         echo "1. Access | 2. Error | r. Retour"
         read -r -p "> " c
-        case "$c" in 
+        case "$c" in
             1) run_sudo tail -f "$LOG_ACCESS" ;;
-            2) run_sudo tail -f "$LOG_ERROR" ;; 
-            r) return ;; 
+            2) run_sudo tail -f "$LOG_ERROR" ;;
+            r) return ;;
         esac
     done
 }
 
 menu_system_update() {
-    if ask_sudo_gui; then 
+    if ask_sudo_gui; then
         sudo apt update && sudo apt upgrade -y
         pause
     fi
 }
 
-open_user_shell() { 
+open_user_shell() {
     if ! ask_sudo_gui; then return; fi
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"
     trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_KIOSK_MENU=1
+    export SKIP_KIOSK=1
+    cd "NGINX_HOME" || cd "$HOME"
     bash --login
-    unset SKIP_KIOSK_MENU
+    unset SKIP_KIOSK
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
@@ -578,12 +579,12 @@ spawn_restricted_shell() {
     local TD="$1"
     local SN="$2"
     [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"
-    
+
     echo -e "\n${GREEN}🔒 JAIL $SN${NC}"
     local OH="$HOME"
-    
+
     bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'")
-    
+
     export HOME="$OH"
     trap '' SIGINT SIGQUIT SIGTSTP
 }
@@ -597,15 +598,15 @@ while true; do
     get_sys_info
 
     # STATUS CHECK DANS LA BOUCLE
-    if systemctl is-active --quiet $SERVICE_NAME; then 
+    if systemctl is-active --quiet $SERVICE_NAME; then
         SX="${GREEN}● ON${NC}"
-    else 
+    else
         SX="${RED}● OFF${NC}"
     fi
-    
-    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then 
+
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
         FW="${GREEN}● ACTIF${NC}"
-    else 
+    else
         FW="${RED}● INACTIF${NC}"
     fi
 
@@ -618,9 +619,9 @@ while true; do
     printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
     printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
     printf "  🏠 LAN: %-15s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
-    
+
     echo -e "$SEP"
-    
+
     # --- INFO SERVICE ---
     printf "  🔌 Service : %-12b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
     printf "  ℹ️  Version : %-12s | ⚓ Ports    : %s/%s\n" "${CYAN}$APP_VER${NC}" "${YELLOW}80${NC}" "${YELLOW}443${NC}"
@@ -656,7 +657,7 @@ while true; do
     echo -e "    ${RED}12.${NC}♻️  Redémarrer le serveur"
 
     echo -e "$SEP"
-    
+
     # --- PIED DE PAGE ---
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin   |   [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
@@ -671,12 +672,12 @@ while true; do
         5) manage_nginx_sites_menu ;;
         6) deploy_from_github ;;
         7) firewall_manager ;;
-        8) 
+        8)
            echo "1. WEB | 2. NGINX | 3. PHP"
            read -p "> " j
            [ "$j" == "1" ] && spawn_restricted_shell "$DIR_WEB" "WEB"
-           [ "$j" == "2" ] && spawn_restricted_shell "$DIR_NGINX" "NGINX"
-           [ "$j" == "3" ] && spawn_restricted_shell "$DIR_PHP" "PHP" 
+           [ "$j" == "2" ] && spawn_restricted_shell "$NGINX_HOME" "NGINX"
+           [ "$j" == "3" ] && spawn_restricted_shell "$DIR_PHP" "PHP"
            ;;
         9) backup_menu ;;
         10) menu_system_update ;;
