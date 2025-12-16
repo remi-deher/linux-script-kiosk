@@ -1,17 +1,23 @@
 #!/bin/bash
 
 # =======================================================
-#  MANAGER BASE DE DONNÉES - VERSION FINALE
+#  MANAGER SERVEUR WEB - VERSION FINALE
 # =======================================================
 
 # --- CONFIGURATION ---
-SERVICE_NAME="mariadb"
-DIR_CONF="/etc/mysql"
-BACKUP_DIR="/var/backups/mariadb-manager"
-LOG_ERROR="/var/log/mysql/error.log"
-DB_ROOT_USER="root"
-PUBLIC_IP_CACHE="/tmp/mariadb_public_ip"
-CMD_MYSQL="/usr/bin/mysql"
+DIR_WEB="/var/www"
+DIR_NGINX="/etc/nginx"
+DIR_PHP="/etc/php"
+BACKUP_DIR="/var/backups/nginx-manager"
+LOG_ACCESS="/var/log/nginx/access.log"
+LOG_ERROR="/var/log/nginx/error.log"
+SERVICE_NAME="nginx"
+SITES_AVAIL="$DIR_NGINX/sites-available"
+SITES_ENAB="$DIR_NGINX/sites-enabled"
+
+# Cache & Config
+PUBLIC_IP_CACHE="/tmp/nginx_public_ip"
+CMD_NGINX="/usr/sbin/nginx"
 CMD_UFW="/usr/sbin/ufw"
 
 # --- SÉCURITÉ & COULEURS ---
@@ -33,11 +39,23 @@ run_sudo() {
     sudo "$@"
 }
 run_sudo_silent() { if sudo -n "$@" 2>/dev/null; then return 0; fi; return 1; }
-pause() { echo ""; read -p "Entrée pour continuer..."; }
+pause() { echo ""; read -p "Appuyez sur Entrée pour continuer..."; }
+
+ensure_installed() {
+    local cmd="$1"; local pkg="$2"
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
+        read -p "Installer '$pkg' ? (o/n) " i
+        if [[ "$i" == "o" ]]; then
+            if ask_sudo_gui; then run_sudo apt-get update -qq; run_sudo apt-get install -y "$pkg"; fi
+        else return 1; fi
+    fi
+    return 0
+}
 
 server_power_action() {
     local a="$1"; local c="$2"; local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g')
-    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"; read -p "Tapez '$cw' : " i
+    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"; read -p "Tapez '$cw' pour exécuter : " i
     if [ "$i" == "$cw" ]; then run_sudo $c; exit 0; else echo "Annulé."; pause; fi
 }
 
@@ -50,214 +68,315 @@ get_sys_info() {
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null); [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
+
+    # --- CORRECTION VERSION NGINX ---
+    # Méthode 1 : Execution directe (stderr redirigé vers stdout)
+    APP_VER=$($CMD_NGINX -v 2>&1 | awk -F/ '{print $2}')
+
+    # Méthode 2 : Fallback dpkg si la commande échoue
+    if [ -z "$APP_VER" ]; then
+        APP_VER=$(dpkg -s nginx 2>/dev/null | grep "Version" | awk '{print $2}' | cut -d: -f2 | cut -d- -f1)
+    fi
+
+    [ -z "$APP_VER" ] && APP_VER="Inconnue"
 }
 
-# --- 2. GESTION PARE-FEU AMÉLIORÉE (STANDARDISÉE) ---
+# --- 2. GESTION VHOSTS ---
+
+# Variable globale
+declare -a VHOST_FILES
+
+refresh_vhost_list() {
+    VHOST_FILES=()
+    shopt -s nullglob; local files=("$SITES_AVAIL"/*); shopt -u nullglob
+
+    echo -e "${BLUE}=== LISTE DES VHOSTS ===${NC}"
+    printf "${GREY}%-3s %-25s %-10s %-30s %-10s${NC}\n" "ID" "DOMAINE" "PORT" "RACINE" "ÉTAT"
+    echo "--------------------------------------------------------------------------------"
+
+    if [ ${#files[@]} -eq 0 ]; then
+        echo "   (Aucun site configuré)"
+    else
+        local i=1
+        for f in "${files[@]}"; do
+            VHOST_FILES+=("$f")
+            bn=$(basename "$f"); bn_noext="${bn%.*}"
+
+            # État
+            if ls "$SITES_ENAB/$bn"* 1> /dev/null 2>&1; then st="${GREEN}● ON${NC}"; else st="${RED}● OFF${NC}"; fi
+
+            # Lecture contenu (Optimisée)
+            if [ -r "$f" ]; then content=$(cat "$f" 2>/dev/null); else content=$(sudo cat "$f" 2>/dev/null); fi
+
+            # Parsing
+            port=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | head -n1)
+            [ -z "$port" ] && port="-"
+            root=$(echo "$content" | grep -E "^\s*root\s+" | awk '{print $2}' | tr -d ';')
+            [ -z "$root" ] && root="-"
+
+            printf "%-3s %-25s %-10s %-30s %b\n" "$i" "${bn_noext:0:24}" "$port" "${root:0:29}" "$st"
+            ((i++))
+        done
+    fi
+    echo "--------------------------------------------------------------------------------"
+}
+
+create_vhost_wizard() {
+    echo -e "\n${GREEN}➕ AJOUTER UN NOUVEAU SITE${NC}"
+    read -p "Nom de domaine (ex: site.lan) : " domain
+    [ -z "$domain" ] && return
+    read -p "Port d'écoute (ex: 80) : " port
+    port=${port:-80}
+    read -p "Dossier racine (défaut: $DIR_WEB/$domain) : " docroot
+    docroot=${docroot:-"$DIR_WEB/$domain"}
+
+    if ! ask_sudo_gui; then return; fi
+
+    # Création dossier
+    if [ ! -d "$docroot" ]; then
+        run_sudo mkdir -p "$docroot"
+        echo "<h1>Site $domain</h1>" | run_sudo tee "$docroot/index.html" >/dev/null
+        run_sudo chown -R www-data:www-data "$docroot"
+        run_sudo chmod -R 755 "$docroot"
+        echo "Dossier $docroot créé."
+    fi
+
+    # Config Nginx
+    conf="$SITES_AVAIL/$domain.conf"
+    run_sudo bash -c "cat > '$conf' <<EOF
+server {
+    listen $port;
+    server_name $domain;
+    root $docroot;
+    index index.html index.htm index.php;
+    access_log /var/log/nginx/${domain}_access.log;
+    error_log /var/log/nginx/${domain}_error.log;
+    location / { try_files \$uri \$uri/ =404; }
+}
+EOF"
+
+    # Activation
+    run_sudo ln -sf "$conf" "$SITES_ENAB/$domain.conf"
+    run_sudo ufw allow "$port/tcp" >/dev/null
+
+    if run_sudo nginx -t; then
+        run_sudo systemctl reload nginx
+        echo -e "${GREEN}✅ Site actif sur le port $port !${NC}"
+    else
+        echo -e "${RED}❌ Erreur config Nginx.${NC}"
+        run_sudo rm "$SITES_ENAB/$domain.conf"
+    fi
+    pause
+}
+
+action_toggle_vhost() {
+    read -p "Numéro du site à basculer (ON/OFF) : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
+        f="${VHOST_FILES[$((sel-1))]}"
+        bn=$(basename "$f")
+        if ! ask_sudo_gui; then return; fi
+
+        target=$(find "$SITES_ENAB" -name "$bn*")
+        if [ -n "$target" ]; then
+            run_sudo rm "$target"; echo -e "${RED}Site désactivé.${NC}"
+        else
+            run_sudo ln -sf "$f" "$SITES_ENAB/$bn"; echo -e "${GREEN}Site activé.${NC}"
+        fi
+        run_sudo systemctl reload nginx; pause
+    else
+        echo "Numéro invalide."; sleep 1
+    fi
+}
+
+action_delete_vhost() {
+    read -p "Numéro du site à SUPPRIMER : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
+        f="${VHOST_FILES[$((sel-1))]}"
+        bn=$(basename "$f")
+        echo -e "${RED}ATTENTION : Suppression de $bn${NC}"
+        read -p "Confirmer ? (o/n) : " c
+        if [ "$c" == "o" ] && ask_sudo_gui; then
+            target=$(find "$SITES_ENAB" -name "$bn*")
+            [ -n "$target" ] && run_sudo rm "$target"
+            run_sudo mkdir -p "$BACKUP_DIR"
+            run_sudo cp "$f" "$BACKUP_DIR/deleted_$bn.conf"
+            run_sudo rm "$f"
+            run_sudo systemctl reload nginx
+            echo "Supprimé."; pause
+        fi
+    fi
+}
+
+action_edit_vhost() {
+    read -p "Numéro du site à modifier : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
+        f="${VHOST_FILES[$((sel-1))]}"
+        if ask_sudo_gui; then
+            run_sudo nano "$f"
+            echo "Vérification..."
+            if run_sudo nginx -t; then run_sudo systemctl reload nginx; echo "Config rechargée."; else echo "${RED}Erreur syntaxe!${NC}"; fi
+            pause
+        fi
+    fi
+}
+
+manage_nginx_sites_menu() {
+    if [ ! -r "$SITES_AVAIL" ]; then ask_sudo_gui; fi
+    while true; do
+        clear
+        refresh_vhost_list
+        echo -e "${BOLD}--- ACTIONS ---${NC}"
+        echo -e "  ${GREEN}1.${NC} ➕ Ajouter un site"
+        echo -e "  ${YELLOW}2.${NC} ⏯️  Activer / Désactiver"
+        echo -e "  ${CYAN}3.${NC} 📝 Modifier"
+        echo -e "  ${RED}4.${NC} 🗑️  Supprimer"
+        echo -e "  ${RED}r.${NC} Retour"
+        read -r -p "> " ch
+        case "$ch" in
+            1) create_vhost_wizard ;;
+            2) action_toggle_vhost ;;
+            3) action_edit_vhost ;;
+            4) action_delete_vhost ;;
+            r) break ;;
+            *) echo "Invalide"; sleep 0.5 ;;
+        esac
+    done
+}
+
+# --- 3. AUTRES FONCTIONS ---
 
 firewall_manager() {
     while true; do
         clear
         if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-
         mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-        if [ ${#RULES[@]} -eq 0 ]; then echo -e "${GREY}   (Aucune règle)${NC}"; else
-            echo "   RÈGLES :"
-            for line in "${RULES[@]}"; do
-                c_line=$(echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/g" | sed "s/DENY/${RED}DENY${NC}/g")
-                echo "   $c_line"
-            done
+        if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
+            for line in "${RULES[@]}"; do echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"; done
         fi
         echo "------------------------------------------------"
-        echo -e "  ${GREEN}1.${NC} ➕ Ajouter un port"
-        echo -e "  ${GREEN}2.${NC} 🗑️  Supprimer (Checkbox)"
-        echo -e "  ${GREEN}3.${NC} ⚡ Activer"
-        echo -e "  ${RED}4.${NC} 🛑 Désactiver"
-        echo -e "  ${YELLOW}5.${NC} 🗃️  Ouvrir MariaDB (3306)"
-        echo -e "  ${YELLOW}6.${NC} 🔑 Ouvrir SSH (22)"
-        echo "------------------------------------------------"
-        echo -e "  ${RED}r.${NC} Retour"
-        read -r -p "Choix > " u
-
-        case "$u" in
-            1) read -p "Port : " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi ;;
-            2) firewall_checkbox_mode ;;
-            3) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
-            4) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
-            5) if ask_sudo_gui; then run_sudo ufw allow 3306/tcp; echo "OK"; pause; fi ;;
-            6) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "OK"; pause; fi ;;
-            r) return ;;
-        esac
-    done
-}
-
-firewall_checkbox_mode() {
-    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
-    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
-
-    while true; do
-        clear; echo -e "${RED}${BOLD}MODE SUPPRESSION${NC}"
-        printf "%-5s %-6s %-30s\n" "COCHE" "NUM" "RÈGLE"
-        for i in "${!RULES[@]}"; do
-            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-            RAW_DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
-            DESC=$(echo "$RAW_DESC" | sed "s/ALLOW/${GREEN}ALLOW${NC}/g" | sed "s/DENY/${RED}DENY${NC}/g")
-            if [ "${SEL[$i]}" == "true" ]; then M="${RED}[X]${NC}"; else M="${GREY}[ ]${NC}"; fi
-            printf " %b   %-6s %b\n" "$M" "#$NUM" "$DESC"
-        done
-        echo "------------------------------------------------"
-        echo -e "  ${CYAN}[Num]${NC} Coche/Décoche | ${RED}[v]${NC} VALIDER | ${GREEN}[r]${NC} Retour"
-        read -r -p "> " k
-
-        if [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -ge 1 ] && [ "$k" -le "${#RULES[@]}" ]; then
-            idx=$((k-1)); [ "${SEL[$idx]}" == "true" ] && SEL[$idx]=false || SEL[$idx]=true
-        elif [ "$k" == "v" ]; then
-            if ask_sudo_gui; then
-                declare -a DELS; for i in "${!RULES[@]}"; do [ "${SEL[$i]}" == "true" ] && DELS+=("$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)"); done
-                SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
-                for n in $SORTED; do yes | sudo ufw delete "$n" >/dev/null; done
-                echo -e "${GREEN}Terminé.${NC}"; pause; break
-            fi
-        elif [ "$k" == "r" ]; then break; fi
-    done
-}
-
-# --- 3. FONCTIONS DB MÉTIER ---
-
-check_mariadb_installed() { if ! command -v mysql &> /dev/null; then return 1; fi; return 0; }
-run_db_command() { if run_sudo $CMD_MYSQL -u $DB_ROOT_USER -e "$1" 2>/dev/null; then return 0; else return 1; fi; }
-
-get_db_info() {
-    DB_STATUS="${RED}● OFF${NC}"; DB_VERSION="N/A"; DB_PORT="🔒"
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        DB_STATUS="${GREEN}● ACTIF${NC}"
-        if check_mariadb_installed; then
-            local Q="(SELECT VARIABLE_VALUE FROM information_schema.global_variables WHERE VARIABLE_NAME = 'version') UNION ALL (SELECT VARIABLE_VALUE FROM information_schema.global_variables WHERE VARIABLE_NAME = 'port')"
-            local INFOS=$(run_sudo_silent $CMD_MYSQL -u $DB_ROOT_USER -e "$Q" 2>/dev/null)
-            if [ $? -eq 0 ] && [ -n "$INFOS" ]; then
-                DB_VERSION=$(echo "$INFOS" | tail -n +2 | awk 'NR==1{print $1}')
-                DB_PORT=$(echo "$INFOS" | tail -n +2 | awk 'NR==2{print $1}')
-            fi
-        fi
-    fi
-}
-
-menu_service_management() {
-    while true; do
-        clear; get_db_info
-        echo -e "${BLUE}=== SERVICE ===${NC}"; echo -e "Statut : $DB_STATUS | Ver : $DB_VERSION | Port : $DB_PORT"
-        echo -e "1. Restart | 2. Start | 3. Stop | 4. Secure Install | 5. Config (50-server.cnf) | r. Retour"
+        echo -e "1. Ouvrir Port | 2. Supprimer (Liste) | 3. ON/OFF | r. Retour"
         read -r -p "> " c
         case "$c" in
-            1) if ask_sudo_gui; then run_sudo systemctl restart $SERVICE_NAME && echo "OK"; pause; fi ;;
-            2) if ask_sudo_gui; then run_sudo systemctl start $SERVICE_NAME && echo "OK"; pause; fi ;;
-            3) if ask_sudo_gui; then run_sudo systemctl stop $SERVICE_NAME && echo "Arrêté"; pause; fi ;;
-            4) if ask_sudo_gui; then run_sudo mysql_secure_installation; pause; fi ;;
-            5) if ask_sudo_gui; then run_sudo nano $DIR_CONF/mariadb.conf.d/50-server.cnf; fi ;;
+            1) read -p "Port: " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi ;;
+            2) echo "Pour supprimer : sudo ufw delete <numéro>"; pause ;;
+            3) if [[ "$ST" == *"ACTIF"* ]]; then run_sudo ufw disable; else run_sudo ufw enable; fi; pause ;;
             r) return ;;
         esac
     done
 }
 
-list_databases() {
-    run_db_command "SHOW DATABASES" | grep -E -v 'Database|information_schema|mysql|performance_schema|sys'
+deploy_from_github() {
+    clear; echo -e "${BLUE}--- DÉPLOIEMENT GITHUB ---${NC}"
+    ensure_installed "git" "git" || return
+    read -p "URL dépôt : " repo_url; [ -z "$repo_url" ] && return
+    echo -e "Dest: ${CYAN}$DIR_WEB/<dossier>${NC}"; read -p "Nom dossier : " folder_name; [ -z "$folder_name" ] && return
+    TARGET="$DIR_WEB/$folder_name"
+    if [ -d "$TARGET" ]; then
+        read -p "Dossier existe. Supprimer ? (o/n) " d; [[ "$d" == "o" ]] && run_sudo rm -rf "$TARGET" || return
+    fi
+    if run_sudo git clone "$repo_url" "$TARGET"; then echo "${GREEN}Cloné.${NC}"; else echo "${RED}Erreur.${NC}"; pause; return; fi
+    if [ -f "$TARGET/composer.json" ]; then
+        read -p "Installer composer ? (o/n) " dc; [[ "$dc" == "o" ]] && ensure_installed "composer" "composer" && run_sudo bash -c "cd $TARGET && export COMPOSER_ALLOW_SUPERUSER=1; composer install --no-interaction --optimize-autoloader"
+    fi
+    run_sudo chown -R www-data:www-data "$TARGET"; run_sudo chmod -R 755 "$TARGET"
+    read -p "Créer Vhost ? (o/n) " cv; [[ "$cv" == "o" ]] && create_vhost_wizard
+    pause
 }
 
-manage_databases() {
-    if ! check_mariadb_installed || ! systemctl is-active --quiet $SERVICE_NAME; then return; fi
+multi_select_backup() {
+    local T="$1"; local L="$2"; [ ! -d "$T" ] && return
+    run_sudo mkdir -p "$BACKUP_DIR"; shopt -s nullglob; local I=("$T"/*); shopt -u nullglob
+    [ ${#I[@]} -eq 0 ] && return
+    declare -A S; for i in "${!I[@]}"; do S[$i]=0; done
     while true; do
-        clear; echo -e "${BLUE}=== BASES DE DONNÉES ===${NC}"; mapfile -t DBS < <(list_databases); i=1
-        if [ ${#DBS[@]} -eq 0 ]; then echo "  (Aucune DB)"; else for db in "${DBS[@]}"; do printf "  ${CYAN}%-2d.${NC} %s\n" "$i" "$db"; ((i++)); done; fi
-        echo "  a. Créer | d. Supprimer | r. Retour"; read -r -p "> " c
-        case "$c" in
-            a) read -p "Nom : " new_db; [[ -z "$new_db" ]] && continue
-               if ask_sudo_gui; then if run_db_command "CREATE DATABASE IF NOT EXISTS \`$new_db\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;"; then echo "${GREEN}OK${NC}"; else echo "${RED}Erreur${NC}"; fi; pause; fi ;;
-            d) read -p "Numéro : " sel; if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le ${#DBS[@]} ]; then db="${DBS[$((sel-1))]}"; read -p "Confirmer $db (OUI) : " k; if [[ "$k" == "OUI" ]] && ask_sudo_gui; then run_db_command "DROP DATABASE \`$db\`;"; echo "Supprimé"; pause; fi; fi ;;
-            r) return ;;
-        esac
-    done
-}
-
-multi_select_db_backup() {
-    if ! check_mariadb_installed || ! systemctl is-active --quiet $SERVICE_NAME; then return; fi
-    run_sudo mkdir -p "$BACKUP_DIR"; mapfile -t DBS < <(list_databases)
-    [ ${#DBS[@]} -eq 0 ] && { echo "Aucune base."; pause; return; }
-    declare -A S; for i in "${!DBS[@]}"; do S[$i]=0; done
-    while true; do
-        clear; echo -e "${BLUE}BACKUP SÉLECTIF${NC}"; C=0
-        for i in "${!DBS[@]}"; do [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"; printf "  %s %2d. %s\n" "$M" $((i+1)) "${DBS[$i]}"; ((C++)); done
+        clear; echo -e "${BLUE}BACKUP : $L${NC}"
+        for i in "${!I[@]}"; do [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"; printf "  %s %2d. %s\n" "$M" $((i+1)) "$(basename "${I[$i]}")"; done
         echo "  G. Go | T. Tout | N. Rien | r. Retour"; read -r -p "> " c
-        [[ "$c" == "r" ]] && break; [[ "$c" =~ [Tt] ]] && { for i in "${!DBS[@]}"; do S[$i]=1; done; continue; }; [[ "$c" =~ [Nn] ]] && { for i in "${!DBS[@]}"; do S[$i]=0; done; continue; }
+        [[ "$c" == "r" ]] && break; [[ "$c" =~ [Tt] ]] && { for i in "${!I[@]}"; do S[$i]=1; done; continue; }; [[ "$c" =~ [Nn] ]] && { for i in "${!I[@]}"; do S[$i]=0; done; continue; }
         if [[ "$c" =~ [Gg] ]]; then
-            L=""; H=0; for i in "${!DBS[@]}"; do [ "${S[$i]}" -eq 1 ] && { L="$L ${DBS[$i]}"; H=1; }; done
+            F=""; H=0; for i in "${!I[@]}"; do [ "${S[$i]}" -eq 1 ] && { F="$F $(basename "${I[$i]}")"; H=1; }; done
             [ $H -eq 0 ] && continue
-            if ask_sudo_gui; then D=$(date +%Y%m%d_%H%M%S); A="$BACKUP_DIR/backup_DBs_$D.sql.gz"; echo "Sauvegarde..."; run_sudo mysqldump -u $DB_ROOT_USER $L | gzip > "$A"; echo "Fini"; fi; pause; break
+            D=$(date +%Y%m%d_%H%M%S); A="backup_${L}_$D.tar.gz"
+            echo "Zip..."; run_sudo bash -c "cd $T && tar -czf $BACKUP_DIR/$A $F"; echo "OK: $A"; pause; break
         fi
-        [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le $C ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
+        [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le ${#I[@]} ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
     done
 }
 
 backup_menu() {
     while true; do
-        clear; echo -e "${BLUE}=== SAUVEGARDES ===${NC}"; echo -e "  1. Complète | 2. Sélective | 3. Voir | 4. Restaurer | r. Retour"
+        clear; echo -e "${BLUE}=== 💾 SAUVEGARDES ===${NC}"; echo -e "  1. Complète | 2. Config Nginx | 3. Data Web | 4. Vhosts | 5. Voir | 6. Restaurer Vhost | r. Retour"
         read -r -p "> " c; D=$(date +%Y%m%d_%H%M%S)
-        if ! check_mariadb_installed || ! systemctl is-active --quiet $SERVICE_NAME; then echo "Service inactif."; pause; continue; fi
         case "$c" in
-            1) if ask_sudo_gui; then A="$BACKUP_DIR/FULL_DB_BACKUP_$D.sql.gz"; run_sudo mkdir -p "$BACKUP_DIR"; echo "Dump..."; run_sudo mysqldump -u $DB_ROOT_USER --all-databases | gzip > "$A"; pause; fi ;;
-            2) multi_select_db_backup ;;
-            3) run_sudo mkdir -p "$BACKUP_DIR" 2>/dev/null; ls -lh "$BACKUP_DIR" 2>/dev/null; pause ;;
-            4) if ask_sudo_gui; then read -e -p "Fichier : " f; if [ -f "$f" ]; then read -p "Confirmer (o) : " o; if [[ "$o" == "o" ]]; then echo "Restauration..."; if [[ "$f" == *.gz ]]; then run_sudo zcat "$f" | run_sudo $CMD_MYSQL -u $DB_ROOT_USER; else run_sudo cat "$f" | run_sudo $CMD_MYSQL -u $DB_ROOT_USER; fi; fi; else echo "Introuvable"; fi; pause; fi ;;
+            1) if ask_sudo_gui; then run_sudo mkdir -p "$BACKUP_DIR"; run_sudo tar -czf "$BACKUP_DIR/FULL_SERVER_$D.tar.gz" "$DIR_NGINX" "$DIR_WEB"; echo "OK"; pause; fi ;;
+            2) if ask_sudo_gui; then run_sudo mkdir -p "$BACKUP_DIR"; run_sudo tar -czf "$BACKUP_DIR/NGINX_CONF_$D.tar.gz" "$DIR_NGINX"; echo "OK"; pause; fi ;;
+            3) multi_select_backup "$DIR_WEB" "WebData" ;;
+            4) multi_select_backup "$SITES_AVAIL" "Vhosts" ;;
+            5) ls -lh "$BACKUP_DIR" 2>/dev/null; pause ;;
+            6) shopt -s nullglob; files=("$BACKUP_DIR"/deleted_vhost_*.tar.gz); shopt -u nullglob; if [ ${#files[@]} -eq 0 ]; then echo "Rien."; pause; continue; fi
+               for i in "${!files[@]}"; do echo "$((i+1)). $(basename "${files[$i]}")"; done; read -p "Num > " n
+               if [[ "$n" =~ ^[0-9]+$ ]]; then sel="${files[$((n-1))]}"; run_sudo tar -xzf "$sel" -C "$SITES_AVAIL" && echo "Restauré" && pause; fi ;;
             r) break ;;
         esac
     done
 }
 
-menu_system_update() {
+logs_menu() {
     while true; do
-        clear; echo -e "${BLUE}=== MISE À JOUR ===${NC}"; echo -e "  1. Update | 2. Clean | 0. Retour"; read -r -p "> " u
-        case "$u" in 1) if ask_sudo_gui; then sudo apt update && sudo apt upgrade -y; pause; fi ;; 2) if ask_sudo_gui; then sudo apt autoremove -y; pause; fi ;; 0) return ;; esac
+        clear; echo "1. Access | 2. Error | r. Retour"; read -r -p "> " c
+        case "$c" in 1) run_sudo tail -f "$LOG_ACCESS" ;; 2) run_sudo tail -f "$LOG_ERROR" ;; r) return ;; esac
     done
+}
+
+menu_system_update() {
+    if ask_sudo_gui; then sudo apt update && sudo apt upgrade -y; pause; fi
 }
 
 open_user_shell() { if ! ask_sudo_gui; then return; fi; echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"; trap - SIGINT SIGQUIT SIGTSTP; export SKIP_KIOSK_MENU=1; bash --login; unset SKIP_KIOSK_MENU; trap '' SIGINT SIGQUIT SIGTSTP; }
 spawn_restricted_shell() {
-    local TD="$1"; local SN="$2"; [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"; echo -e "\n${GREEN}🔒 JAIL $SN${NC}"; local OH="$HOME"
+    local TD="$1"; local SN="$2"; [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"
+    echo -e "\n${GREEN}🔒 JAIL $SN${NC}"; local OH="$HOME"
     bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'")
-    export HOME="$OH"; trap '' SIGINT SIGQUIT SIGTSTP
+    export HOME="$OH"; trap '' SIGINT SIGQUIT SIGTSTP;
 }
 
-# --- 3. BOUCLE PRINCIPALE ---
-HEADER_LINE="#############################################"
+# --- 4. BOUCLE PRINCIPALE ---
 while true; do
-    clear; get_sys_info; get_db_info
+    clear; get_sys_info
+
+    # STATUS CHECK DANS LA BOUCLE
+    if systemctl is-active --quiet $SERVICE_NAME; then SX="${GREEN}● ON${NC}"; else SX="${RED}● OFF${NC}"; fi
     if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
 
     echo -e "${BLUE}$HEADER_LINE${NC}"
-    echo -e "${BLUE}#         MANAGER BASE DE DONNÉES         #${NC}"
+    echo -e "${BLUE}#         MANAGER SERVEUR WEB             #${NC}"
     echo -e "${BLUE}$HEADER_LINE${NC}"
     printf "  🖥️  %-20s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
     printf "  🧠 CPU: %-14s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
     printf "  🏠 LAN: %-14s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
     echo "---------------------------------------------"
-    printf "  🔌 Service : %-11b | 🛡️  Pare-feu : %s\n" "$DB_STATUS" "$FW"
-    printf "  ℹ️  Version : %-11s | ⚓ Port     : %s\n" "${CYAN}$DB_VERSION${NC}" "${YELLOW}$DB_PORT${NC}"
+    printf "  🔌 Service : %-11b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
+    printf "  ℹ️  Version : %-11s | ⚓ Ports    : %s/%s\n" "${CYAN}$APP_VER${NC}" "${YELLOW}80${NC}" "${YELLOW}443${NC}"
 
     echo "---------------------------------------------"
     echo -e "${BOLD}--- SECTION SERVICE ---${NC}"
-    echo -e "  ${GREEN}1.${NC} ⚙️  Gestion du Service"
-    echo -e "  ${GREEN}2.${NC} 🗃️  Gestion des Bases de Données (CRUD)"
-    echo -e "  ${GREEN}3.${NC} 💾 Sauvegardes"
+    echo -e "  ${GREEN}1.${NC} ▶️  Démarrer le service"
+    echo -e "  ${GREEN}2.${NC} ⏹️  Arrêter le service"
+    echo -e "  ${GREEN}3.${NC} 🔄 Redémarrer le service"
     echo -e "  ${GREEN}4.${NC} 📜 Logs du service"
     echo ""
     echo -e "${BOLD}--- SECTION GESTION ---${NC}"
-    echo -e "  ${GREEN}5.${NC} 🧱 Pare-feu (UFW)"
-    echo -e "  ${GREEN}6.${NC} 📂 Explorateur Fichiers (Jails)"
-    echo -e "  ${GREEN}7.${NC} 🚀 Mises à jour (App & OS)"
+    echo -e "  ${GREEN}5.${NC} 🌐 Sites Web (VHosts)"
+    echo -e "  ${GREEN}6.${NC} 🧱 Pare-feu (UFW)"
+    echo -e "  ${GREEN}7.${NC} 📂 Explorateur Fichiers (Jails)"
+    echo -e "  ${GREEN}8.${NC} 💾 Sauvegardes"
+    echo -e "  ${GREEN}9.${NC} 🐙 Déployer via GitHub"
     echo ""
     echo -e "${BOLD}--- SECTION SYSTÈME ---${NC}"
-    echo -e "  ${RED}8.${NC} 🔌 Éteindre le serveur"
-    echo -e "  ${RED}9.${NC} ♻️  Redémarrer le serveur"
+    echo -e "  ${GREEN}10.${NC}🚀 Mises à jour Système"
+    echo -e "  ${RED}11.${NC}🔌 Éteindre le serveur"
+    echo -e "  ${RED}12.${NC}♻️  Redémarrer le serveur"
     echo "---------------------------------------------"
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin"
     echo -e "  [${RED}exit${NC}]  🚪 Quitter"
@@ -265,15 +384,18 @@ while true; do
     read -r -p "Votre choix > " ch
 
     case "$ch" in
-        1) menu_service_management ;;
-        2) manage_databases ;;
-        3) backup_menu ;;
-        4) if ask_sudo_gui; then run_sudo tail -f "$LOG_ERROR"; fi ;;
-        5) firewall_manager ;;
-        6) echo "1. Config | 2. Backups"; read -p "> " j; [ "$j" == "1" ] && spawn_restricted_shell "$DIR_CONF" "CONF-DB"; [ "$j" == "2" ] && spawn_restricted_shell "$BACKUP_DIR" "BACKUPS" ;;
-        7) menu_system_update ;;
-        8) server_power_action "ÉTEINDRE" "poweroff" ;;
-        9) server_power_action "REDÉMARRER" "reboot" ;;
+        1) if ask_sudo_gui; then run_sudo systemctl start nginx; echo "OK"; pause; fi ;;
+        2) if ask_sudo_gui; then run_sudo systemctl stop nginx; echo "OK"; pause; fi ;;
+        3) if ask_sudo_gui; then run_sudo systemctl restart nginx; echo "OK"; pause; fi ;;
+        4) logs_menu ;;
+        5) manage_nginx_sites_menu ;;
+        6) firewall_manager ;;
+        7) echo "1. WEB | 2. NGINX | 3. PHP"; read -p "> " j; [ "$j" == "1" ] && spawn_restricted_shell "$DIR_WEB" "WEB"; [ "$j" == "2" ] && spawn_restricted_shell "$DIR_NGINX" "NGINX"; [ "$j" == "3" ] && spawn_restricted_shell "$DIR_PHP" "PHP" ;;
+        8) backup_menu ;;
+        9) deploy_from_github ;;
+        10) menu_system_update ;;
+        11) server_power_action "ÉTEINDRE" "poweroff" ;;
+        12) server_power_action "REDÉMARRER" "reboot" ;;
         admin) open_user_shell ;;
         exit) kill -9 $PPID 2>/dev/null; exit 0 ;;
         *) echo "Choix invalide"; sleep 1 ;;
