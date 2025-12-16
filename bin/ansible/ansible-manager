@@ -3,29 +3,31 @@
 #  MANAGER ANSIBLE
 # ====================
 
-# --- SÉCURITÉ : Empêcher la sortie accidentelle ---
+# --- SÉCURITÉ ---
 trap '' SIGINT SIGQUIT SIGTSTP
 
 # =======================================================
-# CONFIGURATION GLOBALE
+# CONFIGURATION & PERSISTANCE
 # =======================================================
 
-if [ -z "$ANSIBLE_HOME" ]; then
-    export ANSIBLE_HOME="$HOME/ansible"
-fi
-
+if [ -z "$ANSIBLE_HOME" ]; then export ANSIBLE_HOME="$HOME/ansible"; fi
 export ANSIBLE_ROOT=$(readlink -f "$ANSIBLE_HOME")
 export ANSIBLE_CONFIG="$ANSIBLE_ROOT/ansible.cfg"
+CONFIG_FILE="$ANSIBLE_ROOT/.manager_config"
 
-# Chemins internes
+if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
+
+# Défauts
+if [ -z "$BACKUP_DIR" ]; then export BACKUP_DIR="/var/backups/ansible_manager"; fi
+if [ -z "$CRON_USER" ]; then export CRON_USER="root"; fi
+
+# Chemins
 PLAYBOOKS_DIR="$ANSIBLE_ROOT/playbooks"
 ROLES_DIR="$ANSIBLE_ROOT/roles"
-BACKUP_DIR="/var/backups/ansible_manager"
 DESC_FILE="$PLAYBOOKS_DIR/.descriptions"
 VAULT_PASS_FILE="$ANSIBLE_ROOT/.vault_pass"
-CMD_UFW="/usr/sbin/ufw"
 
-# Couleurs
+# Couleurs & Design
 BLUE=$'\033[0;34m'
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
@@ -34,55 +36,72 @@ CYAN=$'\033[0;36m'
 GREY=$'\033[1;30m'
 NC=$'\033[0m'
 BOLD=$'\033[1m'
+SEP="${BLUE}------------------------------------------------${NC}"
+SEP_RED="${RED}------------------------------------------------${NC}"
 
-# Création des dossiers si inexistants
 mkdir -p "$PLAYBOOKS_DIR" "$ROLES_DIR"
 
 # =======================================================
-# FONCTIONS UTILITAIRES
+# UTILITAIRES
 # =======================================================
 
-pause() {
-    echo ""
-    read -p "Entrée pour continuer..."
+pause() { echo ""; read -p "Entrée pour continuer..."; }
+
+save_config() {
+    echo "BACKUP_DIR=\"$BACKUP_DIR\"" > "$CONFIG_FILE"
+    echo "CRON_USER=\"$CRON_USER\"" >> "$CONFIG_FILE"
+    _check_gitignore
+}
+
+_check_gitignore() {
+    cd "$ANSIBLE_ROOT" || return
+    if [ ! -f ".gitignore" ]; then touch ".gitignore"; fi
+    if ! grep -q ".manager_config" ".gitignore"; then echo ".manager_config" >> ".gitignore"; fi
 }
 
 ask_sudo_gui() {
+    # Tente une élévation silencieuse (cache ou NOPASSWD global)
     if sudo -n true 2>/dev/null; then return 0; fi
-    echo -e "\n${YELLOW}🔒 Authentification requise (Sudo)${NC}"
-    read -s -p "Mot de passe : " user_pass
-    echo ""
+    
+    echo -e "\n${YELLOW}🔒 Authentification requise pour cette action${NC}"
+    read -s -p "Mot de passe : " user_pass; echo ""
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0;
-    else
-        echo -e "${RED}❌ Mot de passe incorrect.${NC}"
-        pause
-        return 1
-    fi
+    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
 }
 
-run_as_root() {
-    if ask_sudo_gui; then sudo "$@"; return $?; fi
-    return 1
+run_as_root() { 
+    # Force l'authentification avant d'exécuter la commande sensible
+    if ask_sudo_gui; then sudo "$@"; return $?; fi; return 1; 
 }
 
+# --- INFO SYSTÈME ---
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(curl -s -4 -m 1 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
-
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/;s/ days/j/')
-    
     APP_VER=$(ansible --version 2>/dev/null | head -n1 | awk '{print $NF}' | tr -d ']')
 
     if systemctl is-active --quiet cron; then SX="${GREEN}● ACTIF${NC}"; else SX="${RED}● OFF${NC}"; fi
     if systemctl is-active --quiet ufw; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
+
+    cd "$ANSIBLE_ROOT" || return
+    if [ -d ".git" ]; then
+        if [ -n "$(git status --porcelain)" ]; then ST_GIT="${YELLOW}⚠️  Modifié${NC}"; else ST_GIT="${GREEN}✅ À jour${NC}"; fi
+    else ST_GIT="${RED}🔴 Non Config${NC}"; fi
+
+    if [ -d "$BACKUP_DIR" ]; then ST_BKP="${GREEN}✅ Configuré${NC}"; else ST_BKP="${RED}🔴 Non Config${NC}"; fi
+
+    if [ -r /var/log/syslog ]; then
+        if tail -n 50 /var/log/syslog | grep -qi "CRON.*error\|CRON.*exit status [1-9]"; then
+            ST_CRON="${RED}⚠️  Erreurs${NC}"
+        else ST_CRON="${GREEN}✅ Clean${NC}"; fi
+    else ST_CRON="${GREY}? (No Access)${NC}"; fi
 }
 
 ensure_git() {
@@ -91,623 +110,505 @@ ensure_git() {
         read -p "L'installer ? (o/n) " i
         if [ "$i" == "o" ]; then run_as_root apt update && run_as_root apt install -y git; else return 1; fi
     fi
+    _check_gitignore
     return 0
 }
 
 # =======================================================
-# MODULE : ASSISTANT DE DÉVELOPPEMENT (Wizard)
+# MODULE 1 : ASSISTANT CRÉATION
 # =======================================================
 module_assistant_dev() {
     cd "$ANSIBLE_ROOT" || return
 
     _create_role_wizard() {
-        echo -e "\n${CYAN}--- CRÉATION DE RÔLE ---${NC}"
-        read -p "Nom du rôle (ex: apache, docker) : " rname
-        [ -z "$rname" ] && return
-        
+        echo -e "\n${CYAN}--- NOUVEAU RÔLE ---${NC}"
+        read -p "Nom du rôle (ex: mysql, common) : " rname; [ -z "$rname" ] && return
         target="$ROLES_DIR/$rname"
-        if [ -d "$target" ]; then echo -e "${RED}Erreur: Le dossier existe déjà.${NC}"; pause; return; fi
-
+        if [ -d "$target" ]; then echo -e "${RED}Erreur : Le dossier existe déjà.${NC}"; pause; return; fi
         mkdir -p "$target"/{tasks,handlers,defaults,vars,templates,files,meta}
-        for d in tasks handlers defaults vars meta; do
-            echo "---" > "$target/$d/main.yml"
-        done
-
+        for d in tasks handlers defaults vars meta; do echo "---" > "$target/$d/main.yml"; done
         echo -e "${GREEN}✅ Structure créée dans roles/$rname${NC}"
-
-        read -p "Créer un playbook pour lancer ce rôle ? (o/n) " cp
+        read -p "Générer un playbook d'installation ? (o/n) " cp
         if [ "$cp" == "o" ]; then
-            pb_file="$PLAYBOOKS_DIR/deploy_$rname.yml"
-            cat > "$pb_file" <<EOF
----
-- name: Deploiement de $rname
-  hosts: all
-  become: yes
-  roles:
-    - $rname
-EOF
-            echo -e "${GREEN}✅ Playbook créé : playbooks/deploy_$rname.yml${NC}"
-        fi
-        pause
+            echo -e "---\n- name: Deploy $rname\n  hosts: all\n  become: yes\n  roles:\n    - $rname" > "$PLAYBOOKS_DIR/deploy_$rname.yml"
+            echo -e "${GREEN}✅ Playbook généré : deploy_$rname.yml${NC}"
+        fi; pause
     }
-
+    
     _create_playbook_wizard() {
-        echo -e "\n${CYAN}--- CRÉATION DE PLAYBOOK ---${NC}"
-        read -p "Nom du playbook (sans extension) : " pname
-        [ -z "$pname" ] && return
-        pname="${pname%.yml}.yml"
-        target="$PLAYBOOKS_DIR/$pname"
-
-        if [ -f "$target" ]; then echo -e "${RED}Fichier existant.${NC}"; pause; return; fi
-
-        cat > "$target" <<EOF
----
-- name: Nouveau Playbook
-  hosts: all
-  become: yes
-  tasks:
-    - name: Test ping
-      ping:
-EOF
-        echo -e "${GREEN}✅ Fichier créé : $target${NC}"
-        read -p "L'éditer maintenant ? (o/n) " ed
-        [ "$ed" == "o" ] && nano "$target"
-    }
-
-    _select_role_target() {
-        mapfile -t roles < <(ls -1 "$ROLES_DIR")
-        if [ ${#roles[@]} -eq 0 ]; then echo "Aucun rôle trouvé."; return 1; fi
-        echo "Sélectionnez le rôle cible :"
-        for i in "${!roles[@]}"; do echo "[$i] ${roles[$i]}"; done
-        read -p "> " idx
-        if [[ "$idx" =~ ^[0-9]+$ ]] && [ -n "${roles[$idx]}" ]; then
-            SELECTED_ROLE="${roles[$idx]}"
-            return 0
-        fi
-        return 1
-    }
-
-    _add_task_wizard() {
-        echo -e "\n${CYAN}--- AJOUT DE TÂCHE (Action) ---${NC}"
-        _select_role_target || { pause; return; }
-        
-        echo "Dossier cible ?"
-        echo "1. tasks (Actions principales)"
-        echo "2. handlers (Actions sur notification)"
-        read -p "> " dchoice
-        
-        case "$dchoice" in
-            1) target_file="$ROLES_DIR/$SELECTED_ROLE/tasks/main.yml" ;;
-            2) target_file="$ROLES_DIR/$SELECTED_ROLE/handlers/main.yml" ;;
-            *) return ;;
-        esac
-
-        echo -e "\n${YELLOW}Ajout à la fin de $target_file${NC}"
-        read -p "Nom de la tâche : " tname
-        read -p "Module (ex: apt, copy, service) : " tmod
-        
-        echo "" >> "$target_file"
-        echo "- name: $tname" >> "$target_file"
-        echo "  $tmod:" >> "$target_file"
-        echo "    # TODO: arguments pour $tmod" >> "$target_file"
-        
-        echo -e "${GREEN}✅ Squelette ajouté.${NC}"
-        read -p "Éditer pour compléter ? (o/n) " ed
-        [ "$ed" == "o" ] && nano "$target_file"
-    }
-
-    _add_var_wizard() {
-        echo -e "\n${CYAN}--- AJOUT DE VARIABLE (Config) ---${NC}"
-        _select_role_target || { pause; return; }
-        
-        echo "Dossier cible ?"
-        echo "1. defaults (Valeurs par défaut)"
-        echo "2. vars (Priorité haute)"
-        read -p "> " dchoice
-        
-        case "$dchoice" in
-            1) target_file="$ROLES_DIR/$SELECTED_ROLE/defaults/main.yml" ;;
-            2) target_file="$ROLES_DIR/$SELECTED_ROLE/vars/main.yml" ;;
-            *) return ;;
-        esac
-
-        echo -e "\n${YELLOW}Ajout dans $target_file${NC}"
-        read -p "Nom variable (ex: port_http) : " vname
-        read -p "Valeur : " vval
-        
-        echo "" >> "$target_file"
-        echo "$vname: $vval" >> "$target_file"
-        echo -e "${GREEN}✅ Ajouté.${NC}"
-        sleep 1
-    }
-
-    _delete_wizard() {
-        echo -e "\n${RED}--- SUPPRESSION ---${NC}"
-        echo "1. Supprimer un Rôle"
-        echo "2. Supprimer un Playbook"
-        read -p "> " delc
-        
-        case "$delc" in
-            1)
-                _select_role_target || { pause; return; }
-                read -p "Supprimer DÉFINITIVEMENT '$SELECTED_ROLE' ? (oui/non) " c
-                if [ "$c" == "oui" ]; then rm -rf "$ROLES_DIR/$SELECTED_ROLE"; echo "Fait."; pause; fi
-                ;;
-            2)
-                mapfile -t pbs < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n")
-                if [ ${#pbs[@]} -eq 0 ]; then echo "Vide."; pause; return; fi
-                for i in "${!pbs[@]}"; do echo "[$i] ${pbs[$i]}"; done
-                read -p "Numéro : " idx
-                if [[ "$idx" =~ ^[0-9]+$ ]] && [ -n "${pbs[$idx]}" ]; then
-                    p="${pbs[$idx]}"
-                    read -p "Supprimer '$p' ? (oui/non) " c
-                    if [ "$c" == "oui" ]; then rm "$PLAYBOOKS_DIR/$p"; echo "Fait."; pause; fi
-                fi
-                ;;
-        esac
+        echo -e "\n${CYAN}--- NOUVEAU PLAYBOOK ---${NC}"
+        read -p "Nom du fichier (ex: update_sys) : " p; [ -z "$p" ] && return
+        p="${p%.yml}.yml"; t="$PLAYBOOKS_DIR/$p"
+        if [ -f "$t" ]; then echo -e "${RED}Fichier existant.${NC}"; pause; return; fi
+        echo -e "---\n- name: New Playbook\n  hosts: all\n  become: yes\n  tasks:\n    - name: Ping\n      ping:" > "$t"
+        echo -e "${GREEN}✅ Créé.${NC}"
+        read -p "Ouvrir l'éditeur ? (o/n)" e; [ "$e" == "o" ] && nano "$t"
     }
 
     while true; do
         clear
-        echo -e "${BLUE}=== ASSISTANT DÉVELOPPEMENT ===${NC}"
-        echo -e "  ${GREEN}1.${NC} ✨ Créer un nouveau Rôle"
-        echo -e "  ${GREEN}2.${NC} 📄 Créer un nouveau Playbook"
-        echo "-----------------------------------"
-        echo -e "  ${YELLOW}3.${NC} ➕ Ajouter une Tâche (Action)"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#            ASSISTANT DE CRÉATION             #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Générez rapidement vos structures Ansible.${NC}"
+        echo -e "$SEP"
+        echo -e "  ${GREEN}1.${NC} ✨ Créer un nouveau Rôle (+ Structure)"
+        echo -e "  ${GREEN}2.${NC} 📄 Créer un nouveau Playbook simple"
+        echo -e "  ${YELLOW}3.${NC} ➕ Ajouter une Tâche (Task)"
         echo -e "  ${YELLOW}4.${NC} 💲 Ajouter une Variable (Config)"
-        echo "-----------------------------------"
-        echo -e "  ${RED}5.${NC} 🗑️  Supprimer (Rôle ou Playbook)"
+        echo -e "  ${RED}5.${NC} 🗑️  Supprimer un élément"
+        echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
-        echo ""
-        read -p "> " c
-        case "$c" in
-            1) _create_role_wizard ;;
-            2) _create_playbook_wizard ;;
-            3) _add_task_wizard ;;
-            4) _add_var_wizard ;;
-            5) _delete_wizard ;;
-            0) return ;;
+        echo -e "$SEP"
+        read -p "  Choix > " c
+        case $c in
+            1) _create_role_wizard;; 
+            2) _create_playbook_wizard;;
+            3) echo "Fonction Task Wizard"; pause ;;
+            4) echo "Fonction Var Wizard"; pause ;; 
+            5) echo "Fonction Delete Wizard"; pause ;;
+            0) return;;
         esac
     done
 }
 
 # =======================================================
-# MODULE : SAUVEGARDE & GIT
-# =======================================================
-module_backup_git() {
-    cd "$ANSIBLE_ROOT" || return
-
-    _backup_local() {
-        if ! ask_sudo_gui; then return; fi
-        D=$(date +%Y%m%d_%H%M%S)
-        FILE="$BACKUP_DIR/ansible_backup_$D.tar.gz"
-        
-        sudo mkdir -p "$BACKUP_DIR"
-        echo -e "${CYAN}Création de l'archive locale...${NC}"
-        tar --exclude='.git' --exclude='*.retry' -czf "/tmp/ansible_temp.tar.gz" .
-        sudo mv "/tmp/ansible_temp.tar.gz" "$FILE"
-        echo -e "${GREEN}✅ Sauvegarde réussie :${NC} $FILE"
-        pause
-    }
-
-    _config_git() {
-        ensure_git || return
-        echo -e "\n${CYAN}--- CONFIGURATION GIT & BRANCHES ---${NC}"
-        
-        # 1. INIT
-        if [ ! -d ".git" ]; then git init; else echo "Dépôt local déjà initialisé."; fi
-
-        # 2. USER
-        cuser=$(git config user.name)
-        if [ -z "$cuser" ]; then
-            read -p "Votre Nom : " gname
-            read -p "Votre Email : " gemail
-            git config user.name "$gname"
-            git config user.email "$gemail"
-        fi
-
-        # 3. REMOTE URL
-        cremote=$(git remote get-url origin 2>/dev/null)
-        if [ -z "$cremote" ]; then
-            read -p "URL dépôt (https/ssh) : " gurl
-            [ -n "$gurl" ] && git remote add origin "$gurl"
-        else
-            echo -e "Remote actuel : ${GREY}$cremote${NC}"
-            read -p "Changer URL ? (o/n) " chg
-            if [ "$chg" == "o" ]; then
-                read -p "Nouvelle URL : " nurl
-                git remote set-url origin "$nurl"
-            fi
-        fi
-
-        # 4. CONFIGURATION DES BRANCHES (Local & Distant)
-        echo -e "\n${YELLOW}--- Configuration des Branches ---${NC}"
-        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
-        
-        echo "Le standard actuel est 'main'. Votre branche actuelle est '$current_branch'."
-        read -p "Nom de la branche principale souhaitée (Défaut: main) : " target_branch
-        [ -z "$target_branch" ] && target_branch="main"
-
-        # Renommage Local (Force le nom)
-        if [ "$current_branch" != "$target_branch" ]; then
-            echo -e "${GREY}Renommage local de '$current_branch' vers '$target_branch'...${NC}"
-            git branch -M "$target_branch"
-        else
-            echo -e "${GREEN}Branche locale '$target_branch' OK.${NC}"
-        fi
-
-        # Tentative de liaison Remote (Upstream)
-        echo -e "${GREY}Vérification du dépôt distant...${NC}"
-        if git fetch origin 2>/dev/null; then
-            # Le remote répond, on regarde si la branche existe
-            if git ls-remote --exit-code --heads origin "$target_branch" >/dev/null 2>&1; then
-                git branch --set-upstream-to=origin/"$target_branch" "$target_branch"
-                echo -e "${GREEN}✅ Liaison établie : local/$target_branch <-> origin/$target_branch${NC}"
-            else
-                echo -e "${YELLOW}La branche '$target_branch' n'existe pas encore sur le serveur.${NC}"
-                echo "Elle sera créée automatiquement lors du prochain Push."
-            fi
-        else
-            echo -e "${RED}Impossible de joindre le dépôt distant.${NC}"
-            echo "Vérifiez l'URL ou votre connexion. La config sera appliquée au prochain Push."
-        fi
-        
-        pause
-    }
-
-    _push_git() {
-        ensure_git || return
-        if [ ! -d ".git" ]; then echo -e "${RED}Pas de dépôt git.${NC}"; pause; return; fi
-
-        # Config identité si manquante
-        if [ -z "$(git config user.email)" ]; then
-            echo -e "${RED}Identité Git manquante.${NC}"
-            _config_git
-            return
-        fi
-
-        echo -e "\n${CYAN}--- SYNCHRONISATION GITHUB (PUSH) ---${NC}"
-        
-        # Fetch silencieux
-        git fetch origin > /dev/null 2>&1
-
-        # 1. Check Local Changes
-        git update-index -q --refresh
-        STATUS_PORCELAIN=$(git status --porcelain)
-        NEEDS_PUSH=0
-
-        if [ -n "$STATUS_PORCELAIN" ]; then
-            echo -e "${YELLOW}⚠️  Modifications locales détectées :${NC}"
-            git status -s
-            echo ""
-            read -p "Créer un COMMIT maintenant ? (o/n) " conf
-            if [ "$conf" == "o" ]; then
-                read -p "Message commit : " msg
-                [ -z "$msg" ] && msg="Update via Ansible Manager $(date)"
-                git add -A
-                if git commit -m "$msg"; then
-                    echo -e "${GREEN}Commit créé.${NC}"
-                    NEEDS_PUSH=1
-                else
-                    echo -e "${RED}Erreur lors du commit.${NC}"; pause; return
-                fi
-            fi
-        else
-            echo -e "${GREEN}Aucun fichier en attente de commit.${NC}"
-        fi
-
-        # 2. Check Ahead
-        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
-        UNPUSHED_COUNT=$(git rev-list origin/$CURRENT_BRANCH..HEAD --count 2>/dev/null)
-        
-        if [ -n "$UNPUSHED_COUNT" ] && [ "$UNPUSHED_COUNT" -gt 0 ]; then
-            echo -e "\n${YELLOW}Vous avez $UNPUSHED_COUNT commit(s) prêts à être envoyés.${NC}"
-            NEEDS_PUSH=1
-        fi
-
-        # 3. Action Push (avec fallback intelligent si remote manquant)
-        if [ "$NEEDS_PUSH" == "1" ]; then
-            echo ""
-            read -p "Envoyer vers GitHub (Push) ? (o/n) " cp
-            if [ "$cp" == "o" ]; then
-                echo -e "${CYAN}Push vers origin/$CURRENT_BRANCH...${NC}"
-                
-                # Push standard
-                if git push origin "$CURRENT_BRANCH" 2>/dev/null; then
-                    echo -e "${GREEN}✅ Push réussi.${NC}"
-                else
-                    # Fallback : Premier push / Set Upstream
-                    echo -e "${YELLOW}Premier envoi détecté pour '$CURRENT_BRANCH'. Configuration upstream...${NC}"
-                    if git push -u origin "$CURRENT_BRANCH"; then
-                        echo -e "${GREEN}✅ Push réussi et branche configurée !${NC}"
-                    else
-                        echo -e "${RED}❌ Échec du push.${NC}"
-                    fi
-                fi
-            else
-                echo "Push reporté."
-            fi
-        else
-            if [ -z "$STATUS_PORCELAIN" ]; then
-                echo -e "${GREEN}✅ Tout est synchronisé.${NC}"
-            fi
-        fi
-        pause
-    }
-
-    _pull_git() {
-        ensure_git || return
-        echo -e "\n${CYAN}--- PULL (MISE À JOUR) ---${NC}"
-        
-        current_branch=$(git rev-parse --abbrev-ref HEAD)
-        
-        # Essai standard
-        if git pull > /dev/null 2>&1; then
-            echo -e "${GREEN}✅ Dépôt mis à jour avec succès.${NC}"
-        else
-            echo -e "${YELLOW}⚠️  Le pull standard a échoué.${NC}"
-            echo -e "Tentative de réparation du lien avec origin/$current_branch..."
-            
-            # Essai forcé avec nom de branche explicite
-            if git pull origin "$current_branch"; then
-                echo -e "${GREEN}✅ Succès !${NC}"
-                git branch --set-upstream-to=origin/"$current_branch" "$current_branch" 2>/dev/null
-                echo -e "${GREY}Lien permanent rétabli.${NC}"
-            else
-                echo -e "${RED}❌ Échec critique (Conflit ou branche distante inexistante).${NC}"
-                echo "Essayez de lancer le menu '2. Configurer Dépôt GitHub' pour vérifier les branches."
-            fi
-        fi
-        pause
-    }
-
-    _rollback_git() {
-        ensure_git || return
-        while true; do
-            clear
-            echo -e "${RED}=== ANNULATION / ROLLBACK ===${NC}"
-            echo -e "${GREY}Attention : ces actions peuvent détruire des données.${NC}"
-            echo ""
-            echo "1. Annuler les modifications NON commitées (Discard Changes)"
-            echo "2. Annuler le dernier commit (Garder les fichiers) (Soft Reset)"
-            echo "3. ⚠️  Réinitialiser TOTALEMENT sur le dépôt distant (Hard Reset)"
-            echo "0. Retour"
-            read -p "> " c
-            case "$c" in
-                1)
-                    read -p "Voulez-vous supprimer toutes les modifications en cours ? (o/n) " conf
-                    if [ "$conf" == "o" ]; then
-                        git checkout .
-                        git clean -fd
-                        echo -e "${GREEN}Modifications annulées.${NC}"
-                        pause
-                    fi
-                    ;;
-                2)
-                    read -p "Annuler le dernier commit mais garder les fichiers modifiés ? (o/n) " conf
-                    if [ "$conf" == "o" ]; then
-                        git reset --soft HEAD~1
-                        echo -e "${GREEN}Dernier commit annulé. Fichiers préservés.${NC}"
-                        pause
-                    fi
-                    ;;
-                3)
-                    read -p "⚠️  DANGER: Cela va effacer TOUT ce qui n'est pas sur GitHub. Sûr ? (taper 'OUI') " conf
-                    if [ "$conf" == "OUI" ]; then
-                        git fetch origin
-                        current=$(git rev-parse --abbrev-ref HEAD)
-                        if ! git rev-parse "origin/$current" >/dev/null 2>&1; then
-                             echo "${YELLOW}Branche distante introuvable. Essai sur origin/main...${NC}"
-                             current="main"
-                        fi
-                        git reset --hard origin/$current
-                        echo -e "${GREEN}Dépôt réinitialisé sur origin/$current.${NC}"
-                        pause
-                    fi
-                    ;;
-                0) return ;;
-            esac
-        done
-    }
-
-    _lazygit_mode() {
-        if ! command -v lazygit &> /dev/null; then
-            echo -e "${YELLOW}Lazygit n'est pas installé.${NC}"
-            read -p "L'installer automatiquement ? (o/n) " inst
-            if [ "$inst" == "o" ]; then
-                if ask_sudo_gui; then
-                   echo "Installation de la dernière version..."
-                   LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
-                   curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
-                   tar xf lazygit.tar.gz lazygit
-                   sudo install lazygit /usr/local/bin
-                   rm lazygit.tar.gz lazygit
-                   echo -e "${GREEN}Lazygit installé !${NC}"
-                   sleep 1
-                else
-                   return
-                fi
-            else
-                return
-            fi
-        fi
-
-        echo -e "${GREEN}Ouverture de Lazygit...${NC}"
-        trap - SIGINT SIGQUIT SIGTSTP
-        lazygit
-        trap '' SIGINT SIGQUIT SIGTSTP
-    }
-
-    while true; do
-        clear
-        echo -e "${BLUE}=== SAUVEGARDES & GIT ===${NC}"
-        echo -e "  ${GREEN}1.${NC} 💾 Sauvegarde Locale (Tar.gz)"
-        echo -e "  ${GREEN}2.${NC} ⚙️  Configurer Dépôt GitHub (Init/Branches)"
-        echo -e "  ${GREEN}3.${NC} 🚀 Synchroniser (Push)"
-        echo -e "  ${GREEN}4.${NC} ⬇️  Mettre à jour (Pull)"
-        echo -e "  ${YELLOW}5.${NC} 🔙 Rollback / Annuler"
-        echo -e "  ${CYAN}6.${NC} 🐢 Terminal Avancé (Lazygit)"
-        echo -e "  ${RED}0.${NC} Retour"
-        echo ""
-        read -p "> " c
-        case "$c" in
-            1) _backup_local ;;
-            2) _config_git ;;
-            3) _push_git ;;
-            4) _pull_git ;;
-            5) _rollback_git ;;
-            6) _lazygit_mode ;;
-            0) return ;;
-        esac
-    done
-}
-
-# =======================================================
-# MODULES SIMPLES (Launcher, Cron, etc.)
+# MODULE 2 : LANCEUR
 # =======================================================
 module_launcher() {
     cd "$ANSIBLE_ROOT" || return
     _get_desc() {
         local f="$1"
         local d=$(grep "^$f|" "$DESC_FILE" 2>/dev/null | cut -d'|' -f2-)
-        [ -n "$d" ] && echo "$d" || echo "${GREY}Sans description${NC}"
+        [ -n "$d" ] && echo "$d" || echo "${GREY}Aucune description${NC}"
     }
 
-    mapfile -t files < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n" | sort)
-    if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun playbook.${NC}"; pause; return; fi
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#             LANCEUR DE PLAYBOOKS             #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Sélectionnez un script d'automatisation à exécuter.${NC}"
+        echo -e "$SEP"
 
-    local i=0
-    echo -e "${BLUE}--- SÉLECTIONNER UN PLAYBOOK ---${NC}"
-    for f in "${files[@]}"; do
-        printf "%-3s | %-25s | %s\n" "[$i]" "${f:0:25}" "$(_get_desc "$f")"
-        ((i++))
+        mapfile -t files < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n" | sort)
+        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun playbook trouvé.${NC}"; echo -e "$SEP"; else
+            local i=0
+            for f in "${files[@]}"; do
+                printf "  ${GREEN}[%d]${NC} %-30s ${GREY}%s${NC}\n" "$i" "${f:0:30}" "$(_get_desc "$f")"
+                ((i++))
+            done
+        fi
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo -e "$SEP"
+        
+        read -p "  Numéro du playbook > " idx
+        if [ "$idx" == "0" ]; then return; fi
+        
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
+            sel="${files[$idx]}"
+            echo -e "\n${CYAN}🚀 Lancement de : $sel${NC}"
+            echo -e "${GREY}----------------------------------------${NC}"
+            ansible-playbook "$PLAYBOOKS_DIR/$sel"
+            echo -e "${GREY}----------------------------------------${NC}"
+            pause
+        else echo "Choix invalide."; sleep 0.5; fi
     done
-    
-    echo "0. Retour"
-    read -p "Numéro : " idx
-    if [ "$idx" == "0" ]; then return; fi
-    if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
-        sel="${files[$idx]}"
-        echo -e "\n${GREEN}>>> Lancement de $sel${NC}"
-        ansible-playbook "$PLAYBOOKS_DIR/$sel"
-        pause
-    fi
 }
 
+# =======================================================
+# MODULE 3 : SAUVEGARDE & GIT
+# =======================================================
+module_backup_git() {
+    cd "$ANSIBLE_ROOT" || return
+
+    _run_backup_local() {
+        if [ ! -d "$BACKUP_DIR" ]; then return 1; fi
+        if ! sudo touch "$BACKUP_DIR/.chk" 2>/dev/null; then return 1; fi
+        sudo rm "$BACKUP_DIR/.chk"
+        D=$(date +%Y%m%d_%H%M%S)
+        FILE="$BACKUP_DIR/ansible_backup_$D.tar.gz"
+        echo -e "${GREY}[Local] Compression...${NC}"
+        if tar --exclude='.git' --exclude='*.retry' -czf "/tmp/ansible_temp.tar.gz" . 2>/dev/null; then
+            if sudo mv "/tmp/ansible_temp.tar.gz" "$FILE"; then
+                echo -e "${GREEN}✅ Sauvegarde locale OK : $(basename "$FILE")${NC}"; return 0
+            fi
+        fi
+        echo -e "${RED}❌ Erreur Local.${NC}"; return 1
+    }
+
+    _run_push_git() {
+        if [ ! -d ".git" ]; then return 1; fi
+        echo -e "${GREY}[Git] Sync...${NC}"
+        git fetch origin >/dev/null 2>&1
+        if [ -n "$(git status --porcelain)" ]; then
+            git add -A; git commit -m "Auto-backup $(date)" >/dev/null 2>&1
+        fi
+        cur=$(git rev-parse --abbrev-ref HEAD)
+        if git push origin "$cur" 2>/dev/null || git push -u origin "$cur" 2>/dev/null; then
+             echo -e "${GREEN}✅ Push Git OK (Branche: $cur).${NC}"; return 0
+        else echo -e "${RED}❌ Erreur Push Git.${NC}"; return 1; fi
+    }
+
+    _pull_git() {
+        ensure_git || return
+        cur=$(git rev-parse --abbrev-ref HEAD)
+        if git pull origin "$cur"; then
+            echo -e "${GREEN}✅ Mis à jour.${NC}"
+            git branch --set-upstream-to=origin/"$cur" "$cur" 2>/dev/null
+        else echo -e "${RED}❌ Erreur Pull.${NC}"; fi
+        pause
+    }
+
+    _menu_config() {
+        while true; do
+            clear
+            echo -e "${BLUE}################################################${NC}"
+            echo -e "${BLUE}#            PARAMÈTRES & CONFIG               #${NC}"
+            echo -e "${BLUE}################################################${NC}"
+            echo -e "${GREY}Gérez ici les chemins et la connexion GitHub.${NC}"
+            echo -e "$SEP"
+            
+            curr_remote=$(git remote get-url origin 2>/dev/null || echo "${RED}Non défini${NC}")
+            curr_user=$(git config user.name || echo "${RED}Inconnu${NC}")
+            
+            echo -e "  📂 Dossier Local : ${YELLOW}$BACKUP_DIR${NC}"
+            echo -e "  🔗 Remote Git    : ${CYAN}$curr_remote${NC}"
+            echo -e "  👤 Identité Git  : ${CYAN}$curr_user${NC}"
+            echo -e "$SEP"
+
+            echo -e "  ${GREEN}1.${NC} Changer le dossier de sauvegarde local"
+            echo -e "  ${GREEN}2.${NC} Configurer Remote Git (URL)"
+            echo -e "  ${GREEN}3.${NC} Configurer Identité (Nom/Email)"
+            echo -e "  ${RED}0.${NC} Retour"
+            echo -e "$SEP"
+            
+            read -p "  Choix > " conf_choice
+            case "$conf_choice" in
+                1)
+                    echo -e "\n${CYAN}--- CHEMIN LOCAL ---${NC}"
+                    read -p "Nouveau chemin absolu : " new_path
+                    if [[ "$new_path" == /* ]]; then
+                        if ask_sudo_gui; then
+                            sudo mkdir -p "$new_path"
+                            if sudo touch "$new_path/.test" 2>/dev/null; then
+                                sudo rm "$new_path/.test"
+                                export BACKUP_DIR="$new_path"
+                                save_config
+                                echo -e "${GREEN}✅ Enregistré.${NC}"
+                            else echo -e "${RED}❌ Permission refusée.${NC}"; fi
+                        fi
+                    else echo -e "${RED}Chemin invalide.${NC}"; fi
+                    pause
+                    ;;
+                2)
+                    echo -e "\n${CYAN}--- URL GIT ---${NC}"
+                    read -p "URL (https/ssh) : " u
+                    if [ -n "$u" ]; then
+                        if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin "$u"; else git remote add origin "$u"; fi
+                        echo -e "${GREEN}✅ Remote mis à jour.${NC}"
+                    fi
+                    pause
+                    ;;
+                3)
+                    echo -e "\n${CYAN}--- IDENTITÉ ---${NC}"
+                    read -p "Nom : " n; read -p "Email : " e
+                    git config user.name "$n"; git config user.email "$e"
+                    echo -e "${GREEN}✅ Identité enregistrée.${NC}"
+                    pause
+                    ;;
+                0) return ;;
+            esac
+        done
+    }
+
+    _smart_backup_menu() {
+        echo -e "\n${BOLD}${CYAN}=== ASSISTANT DE SAUVEGARDE ===${NC}"
+        echo "1. 💾 Local uniquement"
+        echo "2. ☁️  Git uniquement"
+        echo "3. 💎 Les Deux (Recommandé)"
+        echo "0. Annuler"
+        read -p "> " choice
+        
+        local sl=0; local sg=0; local al=0; local ag=0
+
+        case "$choice" in
+            1) al=1; if _run_backup_local; then sl=1; fi ;;
+            2) ag=1; if _run_push_git; then sg=1; fi ;;
+            3)
+                al=1; ag=1
+                echo "---"
+                if _run_backup_local; then sl=1; else echo -e "${YELLOW}⚠️  Echec Local.${NC}"; fi
+                echo "---"
+                if _run_push_git; then sg=1; else echo -e "${YELLOW}⚠️  Echec Git.${NC}"; fi
+                ;;
+            0) return ;;
+        esac
+
+        echo -e "\n${BOLD}=== RÉSULTAT ===${NC}"
+        msg=""
+        if [ $al -eq 1 ]; then if [ $sl -eq 1 ]; then msg+="${GREEN}LOCAL [OK]${NC}  "; else msg+="${RED}LOCAL [KO]${NC}  "; fi; fi
+        if [ $ag -eq 1 ]; then if [ $sg -eq 1 ]; then msg+="${GREEN}GIT [OK]${NC}"; else msg+="${RED}GIT [KO]${NC}"; fi; fi
+        echo -e "$msg"
+        pause
+    }
+
+    _lazygit_mode() {
+        if ! command -v lazygit &>/dev/null; then
+             echo -e "${YELLOW}Lazygit introuvable.${NC}"
+             read -p "Installer ? (o/n) " i
+             if [ "$i" == "o" ] && ask_sudo_gui; then
+                 v=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+                 curl -Lo lz.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${v}_Linux_x86_64.tar.gz"
+                 tar xf lz.tar.gz lazygit; sudo install lazygit /usr/local/bin; rm lz.tar.gz lazygit
+             else return; fi
+        fi
+        trap - SIGINT SIGQUIT SIGTSTP; lazygit; trap '' SIGINT SIGQUIT SIGTSTP
+    }
+
+    _rollback_git() {
+        while true; do
+            clear
+            echo -e "${RED}⚠️  ZONE DANGER : ROLLBACK${NC}"
+            echo "1. Annuler modifs (Discard Changes)"
+            echo "2. Reset Soft (Annuler commit, garder fichiers)"
+            echo "3. Reset Hard (Tout effacer > Remote)"
+            echo "0. Retour"
+            read -p "> " c
+            case $c in
+                1) git checkout .; git clean -fd; echo "Annulé."; pause;;
+                2) git reset --soft HEAD~1; echo "Reset Soft OK."; pause;;
+                3) read -p "CONFIRMER (OUI) : " k
+                   if [ "$k" == "OUI" ]; then
+                       git fetch origin
+                       git reset --hard origin/$(git rev-parse --abbrev-ref HEAD)
+                       echo "Reset Hard OK."
+                   fi; pause;;
+                0) return ;;
+            esac
+        done
+    }
+
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#      CENTRE DE SAUVEGARDE & VERSIONNING      #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Gérez vos versions Git et vos archives locales.${NC}"
+        echo -e "$SEP"
+        
+        if [ -d "$BACKUP_DIR" ]; then SL="${GREEN}Configuré${NC}"; else SL="${RED}Invalide${NC}"; fi
+        if [ -d ".git" ]; then SG="${GREEN}Initialisé${NC}"; else SG="${RED}Absent${NC}"; fi
+        
+        printf "  💾 Local : %-25b | 🐱 Git : %s\n" "$SL" "$SG"
+        echo -e "$SEP"
+
+        echo -e " ${BOLD}${CYAN}🚀 ACTIONS${NC}"
+        echo -e "    ${GREEN}1.${NC} 💎 Assistant Sauvegarde (Smart Backup)"
+        echo -e "    ${GREEN}2.${NC} ☁️  Synchroniser Git (Push rapide)"
+        echo -e "    ${GREEN}3.${NC} ⬇️  Mise à jour Git (Pull)"
+        echo ""
+        
+        echo -e " ${BOLD}${CYAN}⚙️  CONFIGURATION${NC}"
+        echo -e "    ${GREEN}4.${NC} 🔧 Configurer (Chemins, Remote, etc.)"
+        echo -e "    ${GREEN}5.${NC} 🐢 Terminal Avancé (Lazygit)"
+        echo -e "    ${YELLOW}6.${NC} 🔙 Rollback / Annuler"
+        
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour au menu principal"
+        echo -e "$SEP"
+
+        read -p "  Choix > " c
+        case "$c" in
+            1) _smart_backup_menu ;;
+            2) _run_push_git; pause ;;
+            3) _pull_git ;;
+            4) _menu_config ;;
+            5) _lazygit_mode ;;
+            6) _rollback_git ;;
+            0) return ;;
+        esac
+    done
+}
+
+# =======================================================
+# MODULE 4 : VAULT
+# =======================================================
+module_vault() {
+    export EDITOR="nano"
+    if [ ! -f "$VAULT_PASS_FILE" ]; then 
+        echo -e "${RED}Erreur : .vault_pass manquant.${NC}"; pause; return
+    fi
+    
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#           GESTION DES SECRETS (VAULT)        #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Chiffrez vos variables sensibles (mots de passe, clés).${NC}"
+        echo -e "$SEP"
+        echo -e "  ${GREEN}1.${NC} 🔒 Chiffrer un fichier (Encrypt)"
+        echo -e "  ${GREEN}2.${NC} 🔓 Déchiffrer un fichier (Decrypt)"
+        echo -e "  ${GREEN}3.${NC} 📝 Éditer un fichier chiffré (Edit)"
+        echo -e "  ${GREEN}4.${NC} 👀 Voir un fichier chiffré (View)"
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo -e "$SEP"
+        
+        read -p "  Choix > " c
+        if [ "$c" == "0" ]; then return; fi
+        
+        read -e -p "  Chemin du fichier (Tab) : " f
+        if [ -z "$f" ]; then continue; fi
+        if [ ! -f "$f" ]; then echo "Introuvable."; pause; continue; fi
+
+        case $c in
+            1) ansible-vault encrypt "$f"; pause ;;
+            2) ansible-vault decrypt "$f"; pause ;;
+            3) ansible-vault edit "$f"; ;;
+            4) ansible-vault view "$f" | less ;;
+        esac
+    done
+}
+
+# =======================================================
+# MODULE 5 : INVENTAIRE
+# =======================================================
+module_inventory() {
+    cd "$ANSIBLE_ROOT" || return
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#              INVENTAIRE ANSIBLE              #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Visualisez vos machines et testez la connexion.${NC}"
+        echo -e "$SEP"
+        echo -e "  ${GREEN}1.${NC} 🌳 Vue Graphique (Groupes/Hôtes)"
+        echo -e "  ${GREEN}2.${NC} 📋 Vue Liste (Détails)"
+        echo -e "  ${GREEN}3.${NC} 📡 Test de connexion (PING All)"
+        echo -e "  ${GREEN}4.${NC} 🔍 Infos détaillées (Setup/Facts)"
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo -e "$SEP"
+
+        read -p "  Choix > " c
+        case $c in
+            1) ansible-inventory --graph; pause ;;
+            2) ansible-inventory --list | grep "ansible_host" -B 5 | less ;;
+            3) echo -e "${CYAN}Ping en cours...${NC}"; ansible all -m ping; pause ;;
+            4) read -p "  Machine : " h; [ -n "$h" ] && ansible "$h" -m setup | less ;;
+            0) return ;;
+        esac
+    done
+}
+
+# =======================================================
+# MODULE 6 : CRON (Monitor)
+# =======================================================
 module_cron() {
     if ! ask_sudo_gui; then return; fi
     while true; do
-        clear; echo -e "${BLUE}=== CRON ===${NC}"
-        echo "1. Éditer crontab root"
-        echo "2. Lister crontab root"
-        echo "0. Retour"
-        read -p "> " c
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#            PLANIFICATEUR (CRON)              #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Gérez l'exécution automatique de vos playbooks.${NC}"
+        echo -e "$SEP"
+        
+        echo -e "  👤 Utilisateur actuel : ${CYAN}$CRON_USER${NC}"
+        echo -e "$SEP"
+        
+        echo -e "  ${GREEN}1.${NC} 📝 Éditer la table Cron (Edit)"
+        echo -e "  ${GREEN}2.${NC} 📄 Lister les tâches actuelles"
+        echo -e "  ${GREEN}3.${NC} 📂 Voir les logs d'exécution (Syslog)"
+        echo -e "  ${GREEN}4.${NC} 🔄 Changer l'utilisateur cible"
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo -e "$SEP"
+        
+        read -p "  Choix > " c
         case $c in
-            1) sudo crontab -e ;;
-            2) sudo crontab -l; pause ;;
+            1) sudo crontab -u "$CRON_USER" -e ;;
+            2) echo -e "\n${CYAN}--- Tâches de $CRON_USER ---${NC}"; sudo crontab -u "$CRON_USER" -l; pause ;;
+            3) sudo grep CRON /var/log/syslog | tail -n 20; pause ;;
+            4) 
+                read -p "  Nouvel utilisateur pour Cron : " u
+                if id "$u" &>/dev/null; then
+                    export CRON_USER="$u"
+                    save_config
+                    echo -e "${GREEN}✅ Utilisateur changé vers $u.${NC}"
+                else
+                    echo -e "${RED}❌ Utilisateur $u inconnu.${NC}"
+                fi
+                pause
+                ;;
             0) return ;;
         esac
     done
 }
 
-module_vault() {
-    export EDITOR="/usr/bin/nano"
-    if [ ! -f "$VAULT_PASS_FILE" ]; then echo "Pas de fichier .vault_pass"; pause; return; fi
-    while true; do
-        clear; echo -e "${BLUE}=== VAULT ===${NC}"
-        echo "1. Encrypt File"
-        echo "2. Decrypt File"
-        echo "3. Edit Encrypted File"
-        echo "0. Retour"
-        read -p "> " c
-        case $c in
-            1) read -p "File: " f; ansible-vault encrypt "$f"; pause ;;
-            2) read -p "File: " f; ansible-vault decrypt "$f"; pause ;;
-            3) read -p "File: " f; ansible-vault edit "$f"; ;;
-            0) return ;;
-        esac
-    done
-}
-
-module_inventory() {
-    while true; do
-        clear; echo -e "${BLUE}=== INVENTAIRE ===${NC}"
-        echo "1. Graphique"
-        echo "2. Liste"
-        echo "3. Ping All"
-        echo "0. Retour"
-        read -p "> " c
-        case $c in
-            1) ansible-inventory --graph; pause ;;
-            2) ansible-inventory --list; pause ;;
-            3) ansible all -m ping; pause ;;
-            0) return ;;
-        esac
-    done
-}
-
-module_jail() {
-    echo -e "\n${GREEN}Shell Restreint dans $ANSIBLE_ROOT${NC}"
-    echo "Tapez 'exit' pour sortir."
-    bash --rcfile <(echo "PS1='(Jail) \w\$ '; cd $ANSIBLE_ROOT")
-}
-
+# =======================================================
+# MODULE 7 : PARE-FEU (UFW) - NOPASSWD Support
+# =======================================================
 module_firewall() {
-    if ! ask_sudo_gui; then return; fi
+    # Pas de blocage global ici pour autoriser le status sans MDP
     while true; do
-        clear; echo -e "${BLUE}=== UFW ===${NC}"
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#             PARE-FEU (UFW)                   #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        
+        # Affichage (Utilise NOPASSWD si dispo, sinon demandera)
         sudo ufw status numbered
-        echo "----------------"
-        echo "1. Allow Port"
-        echo "2. Delete Rule"
-        echo "0. Retour"
-        read -p "> " c
+        
+        echo -e "$SEP"
+        echo -e "  ${GREEN}1.${NC} ➕ Ouvrir un Port (Allow)"
+        echo -e "  ${GREEN}2.${NC} ➖ Supprimer une Règle (Delete)"
+        echo -e "  ${GREEN}3.${NC} 🔄 Recharger (Reload)"
+        echo -e "$SEP_RED"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo -e "$SEP"
+        
+        read -p "  Choix > " c
         case $c in
-            1) read -p "Port: " p; sudo ufw allow "$p"; pause ;;
-            2) read -p "Num: " n; sudo ufw delete "$n"; pause ;;
+            1) read -p "Port (ex: 80/tcp) : " p; run_as_root ufw allow "$p"; pause ;;
+            2) read -p "Numéro de règle : " n; run_as_root ufw delete "$n"; pause ;;
+            3) run_as_root ufw reload; pause ;;
             0) return ;;
         esac
     done
 }
 
+# =======================================================
+# AUTRES OUTILS SIMPLES
+# =======================================================
+module_jail() {
+    echo -e "${GREEN}Jail ($ANSIBLE_ROOT)${NC}"; bash --rcfile <(echo "PS1='(Jail) \w\$ '; cd $ANSIBLE_ROOT")
+}
 module_updates() {
-    if ask_sudo_gui; then
-        sudo apt update && sudo apt upgrade -y
-        pause
-    fi
+    if ask_sudo_gui; then sudo apt update && sudo apt upgrade -y; pause; fi
 }
-
 module_power() {
-    local a="$1"
-    if [ "$a" == "ETEINDRE" ]; then sudo poweroff; fi
-    if [ "$a" == "REDEMARRER" ]; then sudo reboot; fi
+    if [ "$1" == "OFF" ]; then sudo poweroff; else sudo reboot; fi
 }
-
 open_user_shell() {
     if ! ask_sudo_gui; then return; fi
-    echo -e "\n${GREEN}🔓 Console Admin.${NC} 'exit' pour revenir."
-    trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_KIOSK=1
-    cd "$ANSIBLE_ROOT" || cd "$HOME"
-    bash --login
-    unset SKIP_KIOSK
-    trap '' SIGINT SIGQUIT SIGTSTP
+    trap - SIGINT SIGQUIT SIGTSTP; export SKIP_KIOSK=1
+    cd "$ANSIBLE_ROOT" || cd "$HOME"; bash --login; unset SKIP_KIOSK; trap '' SIGINT SIGQUIT SIGTSTP
 }
 
 # =======================================================
-# MENU PRINCIPAL (Main Loop)
+# MENU PRINCIPAL
 # =======================================================
-SEP="${BLUE}------------------------------------------------${NC}"
-SEP_RED="${RED}------------------------------------------------${NC}"
 
 while true; do
     clear
     get_sys_info
     
-    # Header
-    echo -e "${BLUE}###################################${NC}"
-    echo -e "${BLUE}#       ANSIBLE MANAGER           #${NC}"
-    echo -e "${BLUE}###################################${NC}"
+    echo -e "${BLUE}###############################${NC}"
+    echo -e "${BLUE}#       ANSIBLE MANAGER       #${NC}"
+    echo -e "${BLUE}###############################${NC}"
     
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
@@ -715,31 +616,35 @@ while true; do
     echo -e "$SEP"
     printf "  ⏰ Automate : %-20b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
     printf "  ℹ️  Ansible  : %-20s | 📁 Racine    : %s\n" "${CYAN}$APP_VER${NC}" "$(basename "$ANSIBLE_HOME")"
+    printf "  🐱 Git Stat : %-20b | 💾 Backup Loc : %s\n" "$ST_GIT" "$ST_BKP"
+    printf "  👤 Cron User : %-20s | 📉 Log Err    : %b\n" "$CRON_USER" "$ST_CRON"
     echo -e "$SEP"
 
-    # --- SECTION DÉVELOPPEMENT & AUTOMATISATION ---
-    echo -e " ${BOLD}${CYAN}🚀 DÉVELOPPEMENT & OPÉRATIONS${NC}"
-    echo -e "    ${GREEN}1.${NC} 🧙 Assistant Création (Rôles/Tasks/Config)"
-    echo -e "    ${GREEN}2.${NC} ▶️  Lancer un Playbook"
-    echo -e "    ${GREEN}3.${NC} 💾 Sauvegardes & Git (Backup/Push/Rollback)"
+    # Section 1
+    echo -e " ${BOLD}${CYAN}🚀 OPÉRATIONS & DÉVELOPPEMENT${NC}"
+    echo -e "    ${GREEN}1.${NC} 🧙 Assistant Création (Rôles/Tasks)"
+    echo -e "    ${GREEN}2.${NC} 🚀 Lancer un Playbook"
+    echo -e "    ${GREEN}3.${NC} 💎 Centre de Sauvegardes & Git"
     echo -e "    ${GREEN}4.${NC} 🔐 Gestion des Secrets (Vault)"
     echo ""
 
-    # --- SECTION OUTILS ---
+    # Section 2 (Verticale)
     echo -e " ${BOLD}${CYAN}🛠️  OUTILS${NC}"
-    echo -e "    ${GREEN}5.${NC} 🌍 Inventaire"
-    echo -e "    ${GREEN}6.${NC} ⏰ Tâches Cron"
+    echo -e "    ${GREEN}5.${NC} 🌍 Inventaire Ansible"
+    echo -e "    ${GREEN}6.${NC} ⏰ Tâches Planifiées (Cron)"
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
     echo -e "    ${GREEN}8.${NC} 🔒 Shell Restreint (Jail)"
     echo -e "    ${GREEN}9.${NC} 📦 Mises à jour Système"
     
     echo -e "$SEP_RED"
     
-    # --- SECTION SYSTÈME ---
+    # Section 3
     echo -e " ${BOLD}${RED}💀 SYSTÈME${NC}"
-    echo -e "    ${RED}10.${NC}🔌 Éteindre"
-    echo -e "    ${RED}11.${NC}♻️  Redémarrer"
+    echo -e "    ${RED}10.${NC}🔌 Éteindre le serveur"
+    echo -e "    ${RED}11.${NC}♻️  Redémarrer le serveur"
     echo -e "$SEP"
+    
+    # Footer
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin    |    [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
 
@@ -755,8 +660,8 @@ while true; do
         7) module_firewall ;;
         8) module_jail ;;
         9) module_updates ;;
-        10) module_power "ETEINDRE" ;;
-        11) module_power "REDEMARRER" ;;
+        10) module_power "OFF" ;;
+        11) module_power "REBOOT" ;;
         admin) open_user_shell ;;
         exit|q) echo "Bye."; exit 0 ;;
         *) echo "Choix invalide."; sleep 0.5 ;;
