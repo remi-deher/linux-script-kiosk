@@ -1,9 +1,7 @@
 #!/bin/bash
 
 # =======================================================
-#  MANAGER BASE DE DONNÉES
-#  Debian | MariaDB | System Ops | Backup | UFW
-#  Inspiré du script nginx-fw-manager.sh
+#  MANAGER BASE DE DONNÉES - VERSION FINALE (OPTIMISÉE)
 # =======================================================
 
 # --- CONFIGURATION ---
@@ -14,7 +12,7 @@ LOG_ERROR="/var/log/mysql/error.log"
 
 DB_ROOT_USER="root"
 
-# --- CONFIGURATION SYSTÈME (Réutilisation Nginx) ---
+# --- CONFIGURATION SYSTÈME ---
 DIR_WEB="/var/www"
 DIR_NGINX="/etc/nginx"
 DIR_PHP="/etc/php"
@@ -34,15 +32,25 @@ GREY=$'\033[1;30m'
 NC=$'\033[0m'
 BOLD=$'\033[1m'
 
-# --- 1. FONCTIONS SYSTÈME DE BASE (Réutilisées) ---
+# --- 1. FONCTIONS SYSTÈME DE BASE ---
 
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then return 0; fi
+    if sudo -n true 2>/dev/null; then 
+        return 0
+    fi
 
     echo -e "\n${YELLOW}🔒 Authentification requise (Mot de passe Sudo)${NC}"
-    read -s -p "Mot de passe : " user_pass; echo ""
+    read -s -p "Mot de passe : " user_pass
+    echo ""
+    
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
+    if [ $? -eq 0 ]; then 
+        return 0
+    else 
+        echo -e "${RED}❌ Mot de passe incorrect.${NC}"
+        pause
+        return 1
+    fi
 }
 
 run_sudo() {
@@ -59,11 +67,15 @@ run_sudo() {
     sudo "$@"
 }
 
-pause() { echo ""; read -p "Appuyez sur Entrée pour continuer..."; }
+pause() { 
+    echo ""
+    read -p "Appuyez sur Entrée pour continuer..." 
+}
 
 ensure_installed() {
     local cmd="$1"
     local pkg="$2"
+    
     if ! command -v "$cmd" &> /dev/null; then
         echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
         read -p "Installer '$pkg' maintenant ? (o/n) " i
@@ -72,10 +84,17 @@ ensure_installed() {
                 echo -e "${CYAN}Installation de $pkg...${NC}"
                 run_sudo apt-get update -qq
                 if run_sudo apt-get install -y "$pkg"; then
-                    echo -e "${GREEN}✅ Installé.${NC}"; return 0
-                else echo -e "${RED}❌ Échec.${NC}"; return 1; fi
+                    echo -e "${GREEN}✅ Installé.${NC}"
+                    return 0
+                else 
+                    echo -e "${RED}❌ Échec.${NC}"
+                    return 1
+                fi
             fi
-        else echo -e "${RED}❌ Annulé.${NC}"; return 1; fi
+        else 
+            echo -e "${RED}❌ Annulé.${NC}"
+            return 1
+        fi
     fi
     return 0
 }
@@ -86,14 +105,21 @@ server_power_action() {
     if [ "$i" == "confirmer" ]; then
         run_sudo $2
         exit 0
-    else echo "Annulé."; pause; fi
+    else 
+        echo "Annulé."
+        pause
+    fi
 }
 
 get_remote_ip_managed() {
     if [ -f "$PUBLIC_IP_CACHE" ]; then
         LAST_MOD=$(stat -c %Y "$PUBLIC_IP_CACHE")
-        NOW=$(date +%s); DIFF=$((NOW - LAST_MOD))
-        if [ $DIFF -lt 3600 ]; then cat "$PUBLIC_IP_CACHE"; return; fi
+        NOW=$(date +%s)
+        DIFF=$((NOW - LAST_MOD))
+        if [ $DIFF -lt 3600 ]; then 
+            cat "$PUBLIC_IP_CACHE"
+            return
+        fi
     fi
     local PUB_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
     if [[ "$PUB_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
@@ -106,6 +132,16 @@ get_remote_ip_managed() {
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(get_remote_ip_managed)
+    
+    # OS & CPU Info (Ajouté pour cohérence avec le menu)
+    OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
+    [ -z "$OS_NAME" ] && OS_NAME="Linux"
+    
+    CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
+    [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
+    
+    RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
+    SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
 }
 
 open_user_shell() {
@@ -118,7 +154,7 @@ open_user_shell() {
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
-# --- 2. CENTRE DE MISE À JOUR (Réutilisé) ---
+# --- 2. CENTRE DE MISE À JOUR ---
 
 menu_system_update() {
     while true; do
@@ -144,7 +180,8 @@ menu_system_update() {
                    sudo apt-get update
                    echo -e "\n${CYAN}--- APT UPGRADE ---${NC}"
                    sudo apt-get upgrade -y
-                   echo -e "\n${GREEN}Fini.${NC}"; pause
+                   echo -e "\n${GREEN}Fini.${NC}"
+                   pause
                fi
                ;;
             2)
@@ -153,14 +190,16 @@ menu_system_update() {
                    sudo apt-get autoremove -y
                    echo -e "\n${CYAN}--- NETTOYAGE (Clean) ---${NC}"
                    sudo apt-get clean
-                   echo -e "\n${GREEN}Système nettoyé.${NC}"; pause
+                   echo -e "\n${GREEN}Système nettoyé.${NC}"
+                   pause
                fi
                ;;
             3)
                if ask_sudo_gui; then
                    echo -e "\n${CYAN}--- DIST-UPGRADE ---${NC}"
                    sudo apt-get dist-upgrade -y
-                   echo -e "\n${GREEN}Fini.${NC}"; pause
+                   echo -e "\n${GREEN}Fini.${NC}"
+                   pause
                fi
                ;;
             4)
@@ -172,7 +211,7 @@ menu_system_update() {
 }
 
 
-# --- 3. UFW & RESEAU (Réutilisé et adapté) ---
+# --- 3. UFW & RESEAU ---
 
 firewall_checkbox_delete() {
     mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
@@ -181,7 +220,8 @@ firewall_checkbox_delete() {
     declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
 
     while true; do
-        clear; echo -e "${RED}${BOLD}SUPPRESSION UFW (Cochez pour supprimer)${NC}"
+        clear
+        echo -e "${RED}${BOLD}SUPPRESSION UFW (Cochez pour supprimer)${NC}"
         for i in "${!RULES[@]}"; do
             NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
             DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
@@ -216,14 +256,19 @@ firewall_checkbox_delete() {
                         echo "Suppression règle #$n..."
                         yes | sudo ufw delete "$n" >/dev/null
                     done
-                    echo -e "${GREEN}Terminé.${NC}"; pause; break
+                    echo -e "${GREEN}Terminé.${NC}"
+                    pause; break
                 fi
             else
-                echo "Aucune sélection."; pause
+                echo "Aucune sélection."
+                pause
             fi
-        elif [ "$k" == "q" ]; then break
-        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
-        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
+        elif [ "$k" == "q" ]; then 
+            break
+        elif [ "$k" == "a" ]; then 
+            for i in "${!RULES[@]}"; do SEL[$i]=true; done
+        elif [ "$k" == "n" ]; then 
+            for i in "${!RULES[@]}"; do SEL[$i]=false; done
         fi
     done
 }
@@ -232,7 +277,12 @@ manage_ufw_clean() {
     if ! ensure_installed "ufw" "ufw"; then return; fi
     while true; do
         clear
-        if run_sudo ufw status 2>/dev/null | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
+        if run_sudo ufw status 2>/dev/null | grep -q "active"; then 
+            ST="${GREEN}ACTIF${NC}"
+        else 
+            ST="${RED}INACTIF${NC}"
+        fi
+        
         echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"
 
         if [[ "$ST" == *ACTIF* ]]; then
@@ -253,7 +303,10 @@ manage_ufw_clean() {
         case "$u" in
             1) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "${GREEN}SSH ouvert.${NC}"; pause; fi ;;
             2) if ask_sudo_gui; then run_sudo ufw allow "$DB_PORT"/tcp; echo "${GREEN}MariaDB ($DB_PORT) ouvert.${NC}"; pause; fi ;;
-            3) read -p "Port (ex: 8080) : " p; [ -n "$p" ] && { if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi; } ;;
+            3) 
+                read -p "Port (ex: 8080) : " p
+                [ -n "$p" ] && { if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi; } 
+                ;;
             4) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
             5) firewall_checkbox_delete ;;
             6) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
@@ -284,13 +337,15 @@ run_db_command() {
 
 get_db_info() {
     DB_STATUS="${RED}● OFF${NC}"
-    DB_VERSION="N/A"; DB_UPTIME="N/A"; DB_PORT="🔒"
+    DB_VERSION="N/A"
+    DB_UPTIME="N/A"
+    DB_PORT="🔒"
 
     if systemctl is-active --quiet $SERVICE_NAME; then
         DB_STATUS="${GREEN}● ON${NC}"
 
         if check_mariadb_installed; then
-            # CORRECTION : Ajout de la colonne 'ord' pour garantir l'ordre de la requête SQL (ORDER BY ord)
+            # Récupération ordonnée pour éviter les erreurs de parsing
             local INFOS=$(run_db_command "(SELECT VARIABLE_VALUE, 1 AS ord FROM information_schema.global_variables WHERE VARIABLE_NAME = 'version')
                                          UNION ALL
                                          (SELECT VARIABLE_VALUE, 2 AS ord FROM information_schema.global_variables WHERE VARIABLE_NAME = 'port')
@@ -299,20 +354,19 @@ get_db_info() {
                                          ORDER BY ord;" 2>/dev/null)
 
             if [ $? -eq 0 ] && [ -n "$INFOS" ]; then
-                # Maintenant, la sortie a DEUX colonnes: VARIABLE_VALUE et ord.
-                # Nous devons ignorer la première ligne (en-tête) et lire la PREMIÈRE colonne (VARIABLE_VALUE)
-
-                # Évite l'en-tête, lit la première colonne (Version)
+                # On lit la première colonne en sautant l'entête
                 DB_VERSION=$(echo "$INFOS" | tail -n +2 | awk 'NR==1{print $1}')
-                # Évite l'en-tête, lit la première colonne (Port)
                 DB_PORT=$(echo "$INFOS" | tail -n +2 | awk 'NR==2{print $1}')
-                # Évite l'en-tête, lit la première colonne (Uptime)
-                DB_UPTIME=$(echo "$INFOS" | tail -n +2 | awk 'NR==3{print $1}')
+                DB_UPTIME_RAW=$(echo "$INFOS" | tail -n +2 | awk 'NR==3{print $1}')
 
-                if [[ "$DB_UPTIME" =~ ^[0-9]+$ ]]; then
-                    local D=$((DB_UPTIME/86400)); local H=$((DB_UPTIME%86400/3600)); local M=$((DB_UPTIME%3600/60))
+                if [[ "$DB_UPTIME_RAW" =~ ^[0-9]+$ ]]; then
+                    local D=$((DB_UPTIME_RAW/86400))
+                    local H=$((DB_UPTIME_RAW%86400/3600))
+                    local M=$((DB_UPTIME_RAW%3600/60))
                     DB_UPTIME="${D}j ${H}h ${M}m"
-                else DB_UPTIME="N/A"; fi
+                else 
+                    DB_UPTIME="N/A"
+                fi
             fi
         fi
     fi
@@ -357,12 +411,18 @@ list_databases() {
 manage_databases() {
     if ! check_mariadb_installed || ! systemctl is-active --quiet $SERVICE_NAME; then return; fi
     while true; do
-        clear; echo -e "${BLUE}--- GESTION DES BASES DE DONNÉES ---${NC}"
+        clear
+        echo -e "${BLUE}--- GESTION DES BASES DE DONNÉES ---${NC}"
         echo -e "${BOLD}Bases existantes :${NC}"
         mapfile -t DBS < <(list_databases)
         i=1
-        if [ ${#DBS[@]} -eq 0 ]; then echo "  (Aucune DB utilisateur)"; else
-            for db in "${DBS[@]}"; do printf "  ${CYAN}%-2d.${NC} %s\n" "$i" "$db"; ((i++)); done
+        if [ ${#DBS[@]} -eq 0 ]; then 
+            echo "  (Aucune DB utilisateur)"
+        else
+            for db in "${DBS[@]}"; do 
+                printf "  ${CYAN}%-2d.${NC} %s\n" "$i" "$db"
+                ((i++))
+            done
         fi
         echo "----------------------------------------"
         echo -e "  ${GREEN}a.${NC} Créer une nouvelle DB"
@@ -398,7 +458,7 @@ manage_databases() {
                             fi
                         fi
                     else
-                        echo "Annulé."
+                         echo "Annulé."
                     fi
                     pause
                 fi
@@ -417,31 +477,49 @@ multi_select_db_backup() {
     mapfile -t DBS < <(list_databases)
     [ ${#DBS[@]} -eq 0 ] && { echo "Aucune base de données à sauvegarder."; pause; return; }
 
-    declare -A S; for i in "${!DBS[@]}"; do S[$i]=0; done
+    declare -A S
+    for i in "${!DBS[@]}"; do S[$i]=0; done
 
     while true; do
-        clear; echo -e "${BLUE}BACKUP : SÉLECTION BASES DE DONNÉES${NC}"; C=0
+        clear
+        echo -e "${BLUE}BACKUP : SÉLECTION BASES DE DONNÉES${NC}"
+        C=0
         for i in "${!DBS[@]}"; do
             [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"
-            printf "  %s %2d. %s\n" "$M" $((i+1)) "${DBS[$i]}"; ((C++))
+            printf "  %s %2d. %s\n" "$M" $((i+1)) "${DBS[$i]}"
+            ((C++))
         done
         echo "----------------------------------------"
         echo -e "  G. Go | T. Tout | N. Rien | r. Retour"
         read -r -p "> " c
+        
         [[ "$c" == "r" ]] && break
         [[ "$c" =~ [Tt] ]] && { for i in "${!DBS[@]}"; do S[$i]=1; done; continue; }
         [[ "$c" =~ [Nn] ]] && { for i in "${!DBS[@]}"; do S[$i]=0; done; continue; }
+        
         if [[ "$c" =~ [Gg] ]]; then
-            DB_LIST=""; H=0; for i in "${!DBS[@]}"; do [ "${S[$i]}" -eq 1 ] && { DB_LIST="$DB_LIST ${DBS[$i]}"; H=1; }; done
+            DB_LIST=""
+            H=0
+            for i in "${!DBS[@]}"; do 
+                [ "${S[$i]}" -eq 1 ] && { DB_LIST="$DB_LIST ${DBS[$i]}"; H=1; }
+            done
+            
             [ $H -eq 0 ] && continue
+            
             if ask_sudo_gui; then
-                D=$(date +%Y%m%d_%H%M%S); A="$BACKUP_DIR/backup_DBs_$D.sql.gz"
+                D=$(date +%Y%m%d_%H%M%S)
+                A="$BACKUP_DIR/backup_DBs_$D.sql.gz"
                 echo -e "${CYAN}Sauvegarde des DBs sélectionnées...${NC}"
                 run_sudo mysqldump -u $DB_ROOT_USER $DB_LIST | gzip > "$A"
-                if [ $? -eq 0 ]; then echo -e "${GREEN}✅ OK: $A${NC}"; else echo -e "${RED}❌ Échec de la sauvegarde.${NC}"; fi
+                if [ $? -eq 0 ]; then 
+                    echo -e "${GREEN}✅ OK: $A${NC}"
+                else 
+                    echo -e "${RED}❌ Échec de la sauvegarde.${NC}"
+                fi
             fi
             pause; break
         fi
+        
         [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le $C ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
     done
 }
@@ -454,7 +532,8 @@ backup_menu() {
         echo -e "  ${GREEN}3.${NC} 📜 Voir sauvegardes"
         echo -e "  ${GREEN}4.${NC} ♻️  Restaurer une DB (depuis un fichier)"
         echo -e "  ${RED}r.${NC} Retour"
-        read -r -p "> " c; D=$(date +%Y%m%d_%H%M%S)
+        read -r -p "> " c
+        D=$(date +%Y%m%d_%H%M%S)
 
         if ! check_mariadb_installed; then continue; fi
         if ! systemctl is-active --quiet $SERVICE_NAME; then echo "${RED}Service MariaDB inactif.${NC}"; pause; continue; fi
@@ -483,21 +562,27 @@ backup_menu() {
                        fi
                        if [ $? -eq 0 ]; then echo -e "${GREEN}✅ Restauration terminée.${NC}"; else echo -e "${RED}❌ Erreur de restauration. Vérifiez les logs.${NC}"; fi
                    fi
-               else echo "${RED}Fichier non trouvé ou accès refusé.${NC}"; fi; pause ;;
+               else 
+                   echo "${RED}Fichier non trouvé ou accès refusé.${NC}"
+               fi; pause ;;
             r) break ;;
         esac
     done
 }
 
-# --- 8. OUTILS DIVERS (Réutilisés/Adaptés) ---
+# --- 8. OUTILS DIVERS ---
 
 spawn_restricted_shell() {
-    local T="$1"; local N="$2"; [ ! -d "$T" ] && run_sudo mkdir -p "$T"
+    local T="$1"
+    local N="$2"
+    [ ! -d "$T" ] && run_sudo mkdir -p "$T"
     cd "$T" || return
+    
     echo -e "\n${GREEN}🔒 JAIL $N${NC} (ls, cd, cat, nano, cp, mv, rm, mkdir, pwd)"
     trap 'echo ""' SIGINT
     while true; do
-        R="${PWD#$T}"; [ -z "$R" ] && R="/"; read -e -p "${YELLOW}$N${NC}:[${BLUE}$R${NC}]$ " c a
+        R="${PWD#$T}"; [ -z "$R" ] && R="/"
+        read -e -p "${YELLOW}$N${NC}:[${BLUE}$R${NC}]$ " c a
         [ -z "$c" ] && continue
         if [[ "$a" == /* || "$a" == *" /"* || ("$c" != "cd" && "$a" == *".."*) ]]; then echo "${RED}Interdit${NC}"; continue; fi
         case "$c" in
@@ -520,57 +605,87 @@ spawn_restricted_shell() {
 
 
 # --- 9. MAIN LOOP ---
-
-HEADER_LINE="#############################################"
+SEP="${BLUE}------------------------------------------------${NC}"
+SEP_RED="${RED}------------------------------------------------${NC}"
 
 while true; do
     clear
     get_sys_info
     get_db_info
 
-    if run_sudo ufw status 2>/dev/null | grep -q "Status: active"; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
+    if run_sudo ufw status 2>/dev/null | grep -q "Status: active"; then 
+        FW="${GREEN}● ACTIF${NC}"
+    else 
+        FW="${RED}● INACTIF${NC}"
+    fi
 
-    echo -e "${BLUE}$HEADER_LINE${NC}"
-    echo -e "${BLUE}#         MANAGER BASE DE DONNÉES         #${NC}"
-    echo -e "${BLUE}$HEADER_LINE${NC}"
+    # --- EN-TÊTE AVEC CADRE BLEU ---
+    echo -e "${BLUE}################################################${NC}"
+    echo -e "${BLUE}#           MANAGER BASE DE DONNÉES            #${NC}"
+    echo -e "${BLUE}################################################${NC}"
 
-    printf "  💾 MariaDB : %-15b | 🛡️  Pare-feu : %s\n" "$DB_STATUS" "$FW"
+    # --- INFOS SYSTÈME ---
+    printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
+    printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
+    printf "  🏠 LAN: %-15s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
+    
+    echo -e "$SEP"
+    
+    # --- INFO SERVICE ---
+    printf "  💾 MariaDB : %-16b | 🛡️  Pare-feu : %s\n" "$DB_STATUS" "$FW"
+    printf "  ℹ️  Version : %-16s | ⚓ Port     : %s\n" "${CYAN}$DB_VERSION${NC}" "${YELLOW}$DB_PORT${NC}"
+    
+    echo -e "$SEP"
 
-    # AFFICHAGE CORRIGÉ
-    printf "  Version : ${CYAN}%-18s${NC} | Port : ${YELLOW}%s${NC}\n" "$DB_VERSION" "$DB_PORT"
-    echo -e "  ⏳ Uptime : ${CYAN}$DB_UPTIME${NC}"
-
-    echo "---------------------------------------------"
-    echo -e "  ${GREEN}1.${NC} ⚙️  Gestion du Service (Start/Stop/Restart)"
-    echo -e "  ${GREEN}2.${NC} 🗃️  Gestion des Bases de Données (CRUD)"
-    echo -e "  ${GREEN}3.${NC} 💾 Sauvegardes"
-    echo -e "  ${GREEN}4.${NC} 📜 Logs d'Erreur MariaDB"
+    # --- MENU : SERVICE ---
+    echo -e " ${BOLD}${CYAN}⚡ GESTION DU SERVICE${NC}"
+    echo -e "    ${GREEN}1.${NC} ⚙️  Gestion du Service (Start/Stop)"
+    echo -e "    ${GREEN}2.${NC} 📜 Logs d'Erreur MariaDB"
     echo ""
-    echo -e "  ${GREEN}5.${NC} 🧱 Pare-feu (UFW) & Réseau"
-    echo -e "  ${GREEN}6.${NC} 📂 Explorateur Fichiers (Jails)"
-    echo -e "  ${GREEN}7.${NC} 🚀 Mises à jour Système (OS) & Nettoyage"
-    echo "---------------------------------------------"
-    echo -e "  ${RED}8.${NC} 🔌 Éteindre le serveur"
-    echo -e "  ${RED}9.${NC} ♻️  Redémarrer le serveur (Reboot)"
-    echo "---------------------------------------------"
-    echo -e "  [${YELLOW}admin${NC}] 💻 Console Shell"
-    echo -e "  [${RED}exit${NC}]  🚪 Quitter"
-    echo "---------------------------------------------"
-    read -r -p "Votre choix > " ch
+
+    # --- MENU : DONNÉES ---
+    echo -e " ${BOLD}${CYAN}🗃️  DONNÉES & SAUVEGARDES${NC}"
+    echo -e "    ${GREEN}3.${NC} 🗃️  Gestion des Bases de Données (CRUD)"
+    echo -e "    ${GREEN}4.${NC} 💾 Sauvegardes & Restauration"
+    echo ""
+    
+    # --- MENU : OUTILS ---
+    echo -e " ${BOLD}${CYAN}🛠️  OUTILS & SYSTÈME${NC}"
+    echo -e "    ${GREEN}5.${NC} 🧱 Pare-feu (UFW) & Réseau"
+    echo -e "    ${GREEN}6.${NC} 📂 Explorateur Fichiers (Jails)"
+    echo -e "    ${GREEN}7.${NC} 🚀 Mises à jour Système (OS)"
+
+    echo -e "$SEP_RED"
+
+    # --- MENU : SYSTÈME (Danger) ---
+    echo -e " ${BOLD}${RED}💀 ZONES SYSTÈME${NC}"
+    echo -e "    ${RED}8.${NC} 🔌 Éteindre le serveur"
+    echo -e "    ${RED}9.${NC} ♻️  Redémarrer le serveur"
+
+    echo -e "$SEP"
+    
+    # --- PIED DE PAGE ---
+    echo -e "  [${YELLOW}admin${NC}] 💻 Console Shell   |   [${RED}exit${NC}] 🚪 Quitter"
+    echo -e "$SEP"
+
+    read -r -p "  Votre choix > " ch
 
     case "$ch" in
         1) menu_service_management ;;
-        2) manage_databases ;;
-        3) backup_menu ;;
-        4)
+        2)
            if ask_sudo_gui; then
                echo -e "${CYAN}Affichage des logs... (Ctrl+C pour revenir)${NC}"
                run_sudo tail -f "$LOG_ERROR"
            fi
-           trap '' SIGINT SIGQUIT SIGTSTP; pause ;;
+           trap '' SIGINT SIGQUIT SIGTSTP
+           pause 
+           ;;
+        3) manage_databases ;;
+        4) backup_menu ;;
         5) manage_ufw_clean ;;
         6)
-           echo "1. Config MariaDB | 2. Dossier Backups"; read -p "> " j
+           echo "1. Config MariaDB | 2. Dossier Backups"
+           read -p "> " j
            [ "$j" == "1" ] && spawn_restricted_shell "$DIR_CONF" "CONF DB"
            [ "$j" == "2" ] && spawn_restricted_shell "$BACKUP_DIR" "BACKUPS"
            ;;
