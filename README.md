@@ -51,4 +51,4 @@ Chaque manager nécessite des permissions Sudo `NOPASSWD` pour les commandes d'�
 
 ### 3. Configuration du Mode Kiosk
 
-Pour lancer un manager automatiquement au login de l'utilisateur (mode Kiosk), vous devez intégrer la logique fournie dans `config/bashrc-kiosk-config` à la fin du fichier `~/.bashrc` de l'utilisateur.
+Note a venir
