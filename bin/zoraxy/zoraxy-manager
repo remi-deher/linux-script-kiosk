@@ -1,7 +1,7 @@
 #!/bin/bash
-# =============================
-#  MANAGER ZORAXY
-# =============================
+# =======================================================
+#  MANAGER ZORAXY - VERSION FINALE (OPTIMISÉE)
+# =======================================================
 
 # --- CONFIGURATION ---
 SERVICE_NAME="zoraxy"
@@ -38,13 +38,13 @@ get_running_port() {
         echo "$PORT_SERVICE"
         return
     fi
-    
+
     PID=$(pgrep -x "zoraxy" | head -n1)
     if [ -n "$PID" ]; then
         PORT=$(sudo netstat -tulpn 2>/dev/null | grep "$PID/zoraxy" | head -n1 | awk '{print $4}' | awk -F: '{print $NF}')
-        if [ -n "$PORT" ]; then 
+        if [ -n "$PORT" ]; then
             echo "$PORT"
-            return 
+            return
         fi
     fi
     echo "8000"
@@ -55,18 +55,18 @@ CURRENT_PORT=$(get_running_port)
 API_URL="http://127.0.0.1:$CURRENT_PORT"
 
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         return 0
     fi
-    
+
     echo -e "\n${YELLOW}🔒 Authentification système requise${NC}"
     read -s -p "Mot de passe Sudo : " user_pass
     echo ""
-    
+
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then 
+    if [ $? -eq 0 ]; then
         return 0
-    else 
+    else
         echo -e "${RED}❌ Incorrect.${NC}"
         pause
         return 1
@@ -74,74 +74,74 @@ ask_sudo_gui() {
 }
 
 run_sudo() {
-    if sudo -n true 2>/dev/null; then 
+    if sudo -n true 2>/dev/null; then
         sudo "$@"
         return $?
     fi
-    if ! ask_sudo_gui; then 
+    if ! ask_sudo_gui; then
         return 1
     fi
     sudo "$@"
 }
 
-run_sudo_silent() { 
-    if sudo -n "$@" 2>/dev/null; then 
-        return 0 
+run_sudo_silent() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
     fi
-    return 1 
+    return 1
 }
 
-pause() { 
+pause() {
     echo ""
-    read -p "Entrée pour continuer..." 
+    read -p "Entrée pour continuer..."
 }
 
-check_requirements() { 
-    if ! command -v jq &> /dev/null; then 
+check_requirements() {
+    if ! command -v jq &> /dev/null; then
         echo "Erreur: 'jq' manquant. sudo apt install jq"
         exit 1
-    fi 
+    fi
 }
 
-server_power_action() { 
+server_power_action() {
     local a="$1"
     local c="$2"
     local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g')
-    
+
     echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"
     read -p "Tapez '$cw' pour confirmer : " i
-    
-    if [ "$i" == "$cw" ]; then 
+
+    if [ "$i" == "$cw" ]; then
         run_sudo $c
         exit 0
-    else 
+    else
         echo "Annulé."
         pause
-    fi 
+    fi
 }
 
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
-    
-    if [ -f "$PUBLIC_IP_CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PUBLIC_IP_CACHE") )) -lt 3600 ]; then 
+
+    if [ -f "$PUBLIC_IP_CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PUBLIC_IP_CACHE") )) -lt 3600 ]; then
         PUBLIC_IP=$(cat "$PUBLIC_IP_CACHE")
-    else 
+    else
         PUBLIC_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
         [[ "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && echo "$PUBLIC_IP" > "$PUBLIC_IP_CACHE" || PUBLIC_IP="N/A"
     fi
-    
+
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-    
+
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-    
+
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
-    
-    if [ -f "$VERSION_FILE" ]; then 
+
+    if [ -f "$VERSION_FILE" ]; then
         APP_VER=$(cat "$VERSION_FILE")
-    else 
+    else
         APP_VER="Unknown"
     fi
 }
@@ -149,12 +149,12 @@ get_sys_info() {
 # --- AUTHENTIFICATION API ---
 
 check_api_token_bool() {
-    if [ ! -f "$COOKIE_FILE" ]; then 
+    if [ ! -f "$COOKIE_FILE" ]; then
         return 1
     fi
-    
+
     CHECK=$(curl -s -m 2 -k -b "$COOKIE_FILE" "$API_URL/api/auth/username")
-    if [[ "$CHECK" == *\"* ]] && [[ "$CHECK" != *"error"* ]] && [[ "$CHECK" != *"<html"* ]]; then 
+    if [[ "$CHECK" == *\"* ]] && [[ "$CHECK" != *"error"* ]] && [[ "$CHECK" != *"<html"* ]]; then
         return 0
     fi
     return 1
@@ -162,15 +162,15 @@ check_api_token_bool() {
 
 ensure_api_auth() {
     if check_api_token_bool; then return 0; fi
-    
+
     echo -e "\n${CYAN}🔐 Authentification API Zoraxy requise${NC}"
     HOMEPAGE=$(curl -s -L -k -c "$COOKIE_FILE" -b "$COOKIE_FILE" "$API_URL/" --max-time 2)
-    
-    if [ $? -ne 0 ]; then 
+
+    if [ $? -ne 0 ]; then
         echo -e "${RED}Erreur: Zoraxy injoignable ($API_URL)${NC}"
         return 1
     fi
-   
+
     CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
     [ -z "$CSRF_TOKEN" ] && { echo "Erreur Token CSRF"; return 1; }
 
@@ -178,13 +178,13 @@ ensure_api_auth() {
         read -p "Utilisateur : " u
         read -s -p "Mot de passe : " p
         echo ""
-        
+
         curl -s -k -X POST -c "$COOKIE_FILE" -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" -d "username=$u" -d "password=$p" "$API_URL/api/auth/login" > /dev/null
-        
-        if check_api_token_bool; then 
+
+        if check_api_token_bool; then
             echo -e "${GREEN}Connexion réussie.${NC}"
-            return 0 
-        else 
+            return 0
+        else
             echo -e "${RED}Identifiants incorrects.${NC}"
             read -p "Réessayer ? (o/n) " r
             if [[ "$r" != "o" ]]; then return 1; fi
@@ -192,10 +192,10 @@ ensure_api_auth() {
     done
 }
 
-get_api_status_indicator() { 
-    if check_api_token_bool; then 
+get_api_status_indicator() {
+    if check_api_token_bool; then
         echo -e "${GREEN}● Connecté${NC}"
-    else 
+    else
         echo -e "${RED}● Déconnecté${NC}"
     fi
 }
@@ -216,7 +216,7 @@ COUNT_PROXIES=0
 
 refresh_proxy_list_api() {
     if ! check_api_token_bool; then ensure_api_auth || return 1; fi
-    
+
     echo -e "${CYAN}Chargement depuis l'API...${NC}"
     JSON=$(api_req "/api/proxy/list" --data-urlencode "type=host")
 
@@ -233,7 +233,7 @@ refresh_proxy_list_api() {
     # Parsing JSON via JQ
     mapfile -t SITES < <(echo "$JSON" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)|\(.value.ActiveOrigins[0].OriginIpOrDomain // "N/A")|\(.value.UseTLS // false)|\(.value.Disabled // false)"')
 
-    if [ ${#SITES[@]} -eq 0 ]; then 
+    if [ ${#SITES[@]} -eq 0 ]; then
         echo "   (Aucun proxy trouvé)"
     else
         for site in "${SITES[@]}"; do
@@ -242,9 +242,9 @@ refresh_proxy_list_api() {
             read -r domain target use_tls is_disabled <<< "$site"
 
             # Vérification certificat local (approximatif)
-            if sudo -n test -f "$CONF_CERT/$domain.pem" 2>/dev/null || [ -f "$CONF_CERT/$domain.pem" ]; then 
+            if sudo -n test -f "$CONF_CERT/$domain.pem" 2>/dev/null || [ -f "$CONF_CERT/$domain.pem" ]; then
                 ssl_txt="${GREEN}OUI${NC}"
-            else 
+            else
                 ssl_txt="${RED}NON${NC}"
             fi
 
@@ -270,10 +270,10 @@ add_proxy_wizard() {
     echo -e "\n${BLUE}=== 🧙 ASSISTANT AJOUT ===${NC}"
     read -p "Domaine (ex: app.lan) : " d
     [ -z "$d" ] && return
-    
+
     read -p "Cible (IP:Port) : " t
     [ -z "$t" ] && return
-    
+
     read -p "HTTPS Cible ? (o/n) : " x
     [ "$x" == "o" ] && tls="true" || tls="false"
 
@@ -287,11 +287,11 @@ edit_proxy_target() {
     if [[ "$sel" =~ ^[0-9]+$ ]] && [ -n "${MAP_DOMAINS[$sel]}" ]; then
         dom="${MAP_DOMAINS[$sel]}"
         old="${MAP_TARGETS[$sel]}"
-        
+
         echo -e "Cible actuelle : ${YELLOW}$old${NC}"
         read -p "Nouvelle Cible : " new_ep
         [ -z "$new_ep" ] && return
-        
+
         read -p "HTTPS sur nouvelle cible ? (o/n) : " x
         [ "$x" == "o" ] && tls="true" || tls="false"
 
@@ -354,8 +354,8 @@ workflow_change_port() {
     echo -e "${BLUE}=== ⚙️  CHANGEMENT DE PORT ===${NC}"
     echo "Port Actuel : $CURRENT_PORT"
     read -p "Nouveau Port : " new_port
-    
-    if [[ ! "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -eq "$CURRENT_PORT" ]; then 
+
+    if [[ ! "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -eq "$CURRENT_PORT" ]; then
         echo "Invalide."
         pause
         return
@@ -369,14 +369,14 @@ workflow_change_port() {
     echo -e "\n${BOLD}2. Mise à jour VHosts...${NC}"
     JSON=$(api_req "/api/proxy/list" --data-urlencode "type=host")
     mapfile -t TARGETS < <(echo "$JSON" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)|\(.value.ActiveOrigins[0].OriginIpOrDomain)"')
-    
+
     local_ip=$(hostname -I | awk '{print $1}')
     count=0
 
     for item in "${TARGETS[@]}"; do
         domain=${item%%|*}
         target=${item#*|}
-        
+
         if [[ "$target" =~ (127\.0\.0\.1|localhost|$local_ip):$CURRENT_PORT ]]; then
             new_target=$(echo "$target" | sed "s/:$CURRENT_PORT/:$new_port/")
             echo -e "  -> Update $domain : $target => $new_target"
@@ -384,17 +384,17 @@ workflow_change_port() {
             ((count++))
         fi
     done
-    
+
     echo "  $count mis à jour."
     echo -e "\n${BOLD}3. Système & Restart...${NC}"
     SERVICE_PATH=$(systemctl show -p FragmentPath "$SERVICE_NAME" | cut -d= -f2)
     run_sudo sed -i "s/-port=:$CURRENT_PORT/-port=:$new_port/g" "$SERVICE_PATH"
-    
+
     run_sudo ufw allow "$new_port/tcp" >/dev/null
     run_sudo ufw delete allow "$CURRENT_PORT/tcp" >/dev/null
     run_sudo systemctl daemon-reload
     run_sudo systemctl restart "$SERVICE_NAME"
-    
+
     CURRENT_PORT=$new_port
     API_URL="http://127.0.0.1:$CURRENT_PORT"
     echo -e "${GREEN}Terminé.${NC}"
@@ -407,19 +407,19 @@ menu_daemon_modern() {
     while true; do
         clear
         ST=$(systemctl is-active "$SERVICE_NAME")
-        if [ "$ST" == "active" ]; then 
+        if [ "$ST" == "active" ]; then
             C="${GREEN}ACTIF${NC}"
-        else 
+        else
             C="${RED}INACTIF${NC}"
         fi
-        
+
         API_ST=$(get_api_status_indicator)
         echo -e "${BLUE}=== ⚙️  DAEMON ===${NC}"
         echo -e "  État : $C | API : $API_ST | Port : $CURRENT_PORT"
         echo "------------------------------------------------"
         echo -e "  1. ⚡ Changer Port (Wizard) | 2. Restart | 3. Stop | 4. Start | r. Retour"
         read -r -p "> " c
-        
+
         case "$c" in
             1) workflow_change_port ;;
             2) if ask_sudo_gui; then run_sudo systemctl restart "$SERVICE_NAME"; echo "OK"; pause; fi ;;
@@ -484,14 +484,14 @@ firewall_manager() {
         clear
         if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-        
+
         mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
         if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
-            for line in "${RULES[@]}"; do 
+            for line in "${RULES[@]}"; do
                 echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
-        
+
         echo "------------------------------------------------"
         echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
         echo -e "  ${GREEN}2.${NC} 🔌 Ouvrir Port Zoraxy ($CURRENT_PORT)"
@@ -517,49 +517,49 @@ firewall_manager() {
 
 menu_backup() {
     if [ ! -d "$BACKUP_DIR" ]; then run_sudo mkdir -p "$BACKUP_DIR"; fi
-    
-    while true; do 
+
+    while true; do
         clear
         echo -e "${BLUE}=== BACKUP ===${NC}"
         ls -lh "$BACKUP_DIR" | grep "tar.gz"
-        echo "1. Créer | 2. Supprimer | r. Retour" 
+        echo "1. Créer | 2. Supprimer | r. Retour"
         read -r -p "> " c
-        
-        case "$c" in 
-            1) 
-                if ask_sudo_gui; then 
+
+        case "$c" in
+            1)
+                if ask_sudo_gui; then
                     T=$(date +%Y%m%d_%H%M)
                     sudo bash -c "cd $ZORAXY_HOME && tar --exclude='zoraxy' --exclude='*.tar.gz' -czf '$BACKUP_DIR/bkp_$T.tar.gz' ."
                     echo "OK"
                     pause
-                fi 
-                ;; 
-            2) 
+                fi
+                ;;
+            2)
                 read -p "Fichier: " f
-                if [ -f "$BACKUP_DIR/$f" ] && ask_sudo_gui; then 
+                if [ -f "$BACKUP_DIR/$f" ] && ask_sudo_gui; then
                     sudo rm "$BACKUP_DIR/$f"
                     echo "Del"
                     pause
-                fi 
-                ;; 
-            r) return ;; 
+                fi
+                ;;
+            r) return ;;
         esac
     done
 }
 
 menu_update_center() {
-    while true; do 
+    while true; do
         clear
         echo -e "${BLUE}=== UPDATE ===${NC}"
         L=$(get_local_version)
         R=$(get_remote_version_managed)
         echo "Local: $L | Remote: $R"
-        echo "1. Update Zoraxy | 2. System Update | r. Retour" 
+        echo "1. Update Zoraxy | 2. System Update | r. Retour"
         read -r -p "> " c
-        
-        case "$c" in 
-            1) 
-                if ask_sudo_gui; then 
+
+        case "$c" in
+            1)
+                if ask_sudo_gui; then
                     wget -q --show-progress -O /tmp/z_new "https://github.com/$GITHUB_REPO/releases/download/$R/zoraxy_linux_amd64" && \
                     run_sudo systemctl stop $SERVICE_NAME && \
                     run_sudo mv $ZORAXY_HOME/zoraxy $ZORAXY_HOME/zoraxy.old && \
@@ -569,39 +569,40 @@ menu_update_center() {
                     run_sudo systemctl start $SERVICE_NAME && \
                     echo "OK"
                     pause
-                fi 
-                ;; 
-            2) 
-                if ask_sudo_gui; then 
+                fi
+                ;;
+            2)
+                if ask_sudo_gui; then
                     sudo apt update && sudo apt upgrade -y
                     pause
-                fi 
-                ;; 
-            r) return ;; 
+                fi
+                ;;
+            r) return ;;
         esac
     done
 }
 
-open_user_shell() { 
+open_user_shell() {
     if ! ask_sudo_gui; then return; fi
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"
     trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_KIOSK_MENU=1
+    export SKIP_KIOSK=1
+    cd "ZORAXY_HOME" || cd "$HOME"
     bash --login
-    unset SKIP_KIOSK_MENU
+    unset SKIP_KIOSK
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
-spawn_restricted_shell() { 
+spawn_restricted_shell() {
     local TD="$1"
     local SN="$2"
     [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"
-    
+
     echo -e "\n${GREEN}🔒 JAIL $SN${NC}"
     local OH="$HOME"
-    
+
     bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'")
-    
+
     export HOME="$OH"
     trap '' SIGINT SIGQUIT SIGTSTP
 }
@@ -617,9 +618,9 @@ while true; do
 
     # État des services
     ST=$(systemctl is-active --quiet "$SERVICE_NAME" && echo "${GREEN}● ON${NC}" || echo "${RED}● OFF${NC}")
-    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then 
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
         FW_ST="${GREEN}● ACTIF${NC}"
-    else 
+    else
         FW_ST="${RED}● INACTIF${NC}"
     fi
 
@@ -632,9 +633,9 @@ while true; do
     printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
     printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
     printf "  🏠 LAN: %-15s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
-    
+
     echo -e "$SEP"
-    
+
     # --- INFO SERVICE ---
     printf "  🔌 Service : %-12b | 🛡️  Pare-feu : %s\n" "$ST" "$FW_ST"
     printf "  ℹ️  Version : %-12s | ⚓ Port     : %s\n" "${CYAN}$APP_VER${NC}" "${YELLOW}$CURRENT_PORT${NC}"
@@ -663,19 +664,19 @@ while true; do
     echo -e "    ${RED}9.${NC} ♻️  Redémarrer le serveur"
 
     echo -e "$SEP"
-    
+
     # --- PIED DE PAGE ---
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin   |   [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
-    
+
     read -r -p "  Votre choix > " ch
 
     case "$ch" in
-        1) 
-           trap - SIGINT 
+        1)
+           trap - SIGINT
            echo -e "\n${CYAN}--- LOGS (Ctrl+C pour quitter) ---${NC}"
-           run_sudo journalctl -u "$SERVICE_NAME" -f -n 50 
-           trap '' SIGINT 
+           run_sudo journalctl -u "$SERVICE_NAME" -f -n 50
+           trap '' SIGINT
            ;;
         2) menu_daemon_modern ;;
         3) manage_zoraxy_menu ;;
