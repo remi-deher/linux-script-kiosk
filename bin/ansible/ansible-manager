@@ -1,7 +1,7 @@
 #!/bin/bash
-# =========================
+# ====================
 #  MANAGER ANSIBLE
-# =========================
+# ====================
 
 # --- SÉCURITÉ : Empêcher la sortie accidentelle ---
 trap '' SIGINT SIGQUIT SIGTSTP
@@ -19,11 +19,13 @@ export ANSIBLE_CONFIG="$ANSIBLE_ROOT/ansible.cfg"
 
 # Chemins internes
 PLAYBOOKS_DIR="$ANSIBLE_ROOT/playbooks"
+ROLES_DIR="$ANSIBLE_ROOT/roles"
+BACKUP_DIR="/var/backups/ansible_manager"
 DESC_FILE="$PLAYBOOKS_DIR/.descriptions"
 VAULT_PASS_FILE="$ANSIBLE_ROOT/.vault_pass"
 CMD_UFW="/usr/sbin/ufw"
 
-# Couleurs (Correction: ajout de $ pour interprétation ANSI)
+# Couleurs
 BLUE=$'\033[0;34m'
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
@@ -32,6 +34,9 @@ CYAN=$'\033[0;36m'
 GREY=$'\033[1;30m'
 NC=$'\033[0m'
 BOLD=$'\033[1m'
+
+# Création des dossiers si inexistants
+mkdir -p "$PLAYBOOKS_DIR" "$ROLES_DIR"
 
 # =======================================================
 # FONCTIONS UTILITAIRES
@@ -61,450 +66,516 @@ run_as_root() {
     return 1
 }
 
-# --- RÉCUPÉRATION DES INFOS SYSTÈME ---
 get_sys_info() {
-    # 1. IP
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(curl -s -4 -m 1 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
 
-    # 2. OS
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
 
-    # 3. CPU/RAM
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-
-    # 4. Uptime
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/;s/ days/j/')
     
-    # 5. Version Ansible
     APP_VER=$(ansible --version 2>/dev/null | head -n1 | awk '{print $NF}' | tr -d ']')
 
-    # 6. Status Services (Cron & UFW)
-    if systemctl is-active --quiet cron; then 
-        SX="${GREEN}● ACTIF${NC}"
-    else 
-        SX="${RED}● OFF${NC}"
-    fi
+    if systemctl is-active --quiet cron; then SX="${GREEN}● ACTIF${NC}"; else SX="${RED}● OFF${NC}"; fi
+    if systemctl is-active --quiet ufw; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
+}
 
-    if systemctl is-active --quiet ufw; then
-        FW="${GREEN}● ACTIF${NC}"
-    else
-        FW="${RED}● INACTIF${NC}"
+ensure_git() {
+    if ! command -v git &> /dev/null; then
+        echo -e "${YELLOW}Git n'est pas installé.${NC}"
+        read -p "L'installer ? (o/n) " i
+        if [ "$i" == "o" ]; then run_as_root apt update && run_as_root apt install -y git; else return 1; fi
     fi
+    return 0
 }
 
 # =======================================================
-# MODULE : LANCEUR DE PLAYBOOK (Launcher)
+# MODULE : ASSISTANT DE DÉVELOPPEMENT (Wizard)
 # =======================================================
-module_launcher() {
-    local main_choice
-    local SELECTED_FILE
-    
+module_assistant_dev() {
     cd "$ANSIBLE_ROOT" || return
 
-    _get_desc() {
-        local filename="$1"
-        local saved_desc=$(grep "^$filename|" "$DESC_FILE" 2>/dev/null | cut -d'|' -f2-)
-        if [ -n "$saved_desc" ]; then
-            echo "$saved_desc"
-        else
-            local yaml_name=$(grep -m 1 "name:" "$PLAYBOOKS_DIR/$filename" 2>/dev/null | sed -E 's/.*name:\s*"?([^"]+)"?/\1/' | sed 's/^[ \t]*//')
-            if [ -n "$yaml_name" ]; then echo "${GREY}(YAML) $yaml_name${NC}"; else echo "${GREY}Aucune description${NC}"; fi
-        fi
-    }
-
-    _save_desc() {
-        if [ ! -f "$DESC_FILE" ]; then touch "$DESC_FILE"; fi
-        sed -i "/^$1|/d" "$DESC_FILE"
-        echo "$1|$2" >> "$DESC_FILE"
-    }
-
-    _select_playbook() {
-        local title="$1"
-        mapfile -t files < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -type f -name "*.yml" -printf "%f\n" 2>/dev/null | sort)
+    _create_role_wizard() {
+        echo -e "\n${CYAN}--- CRÉATION DE RÔLE ---${NC}"
+        read -p "Nom du rôle (ex: apache, docker) : " rname
+        [ -z "$rname" ] && return
         
-        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun playbook trouvé.${NC}"; sleep 2; return 1; fi
+        target="$ROLES_DIR/$rname"
+        if [ -d "$target" ]; then echo -e "${RED}Erreur: Le dossier existe déjà.${NC}"; pause; return; fi
 
-        if command -v fzf &> /dev/null; then
-            local list_fzf=""
-            for f in "${files[@]}"; do
-                d=$(_get_desc "$f")
-                clean_d=$(echo "$d" | sed 's/\x1b\[[0-9;]*m//g')
-                list_fzf+="$f :: $clean_d\n"
-            done
-            local sel=$(echo -e "$list_fzf" | fzf --height=40% --layout=reverse --border --header="--- $title ---" --delimiter=' :: ' --with-nth=1,2)
-            if [ -z "$sel" ]; then return 1; fi
-            SELECTED_FILE=$(echo "$sel" | awk -F ' :: ' '{print $1}')
-            return 0
-        else
-            local i=0
-            echo -e "${BLUE}--- $title ---${NC}"
-            for f in "${files[@]}"; do
-                printf "%-3s | %-25s | %s\n" "[$i]" "${f:0:25}" "$(_get_desc "$f")"
-                ((i++))
-            done
-            read -p "Numéro : " idx
-            if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
-                SELECTED_FILE="${files[$idx]}"
-                return 0
-            fi
-            return 1
-        fi
-    }
-
-    while true; do
-        clear
-        echo -e "${BLUE}=== LANCEUR DE PLAYBOOKS ===${NC}"
-        echo "1. Lancer un playbook"
-        echo "2. Modifier une description"
-        echo "3. Supprimer un playbook"
-        echo "r. Retour au menu principal"
-        echo ""
-        read -p "Choix > " main_choice
-
-        case $main_choice in
-            1)
-                if _select_playbook "LANCEMENT"; then
-                    echo -e "\n${GREEN}>>> Exécution de : $SELECTED_FILE${NC}"
-                    ansible-playbook "$PLAYBOOKS_DIR/$SELECTED_FILE"
-                    pause
-                fi
-                ;;
-            2)
-                if _select_playbook "MODIFIER DESC"; then
-                    echo "Actuelle : $(_get_desc "$SELECTED_FILE")"
-                    read -p "Nouvelle description : " new_d
-                    [ -n "$new_d" ] && _save_desc "$SELECTED_FILE" "$new_d"
-                fi
-                ;;
-            3)
-                if _select_playbook "SUPPRIMER"; then
-                    read -p "Confirmer suppression de $SELECTED_FILE ? (oui/non) " c
-                    if [ "$c" == "oui" ]; then
-                        rm "$PLAYBOOKS_DIR/$SELECTED_FILE"
-                        sed -i "/^$SELECTED_FILE|/d" "$DESC_FILE"
-                        echo "Supprimé."; sleep 1
-                    fi
-                fi
-                ;;
-            r|q) return 0 ;;
-        esac
-    done
-}
-
-# =======================================================
-# MODULE : GESTION DES CRONS (Scheduler)
-# =======================================================
-module_cron() {
-    if ! ask_sudo_gui; then return; fi
-
-    local TARGET_USER="root"
-    if [ -f "$ANSIBLE_ROOT/group_vars/all.yml" ] && [ -f "$VAULT_PASS_FILE" ]; then
-        local user_found=$(ansible-vault view "$ANSIBLE_ROOT/group_vars/all.yml" 2>/dev/null | grep "^cron_user:" | awk '{print $2}' | tr -d '"' | tr -d "'")
-        [ -n "$user_found" ] && TARGET_USER="$user_found"
-    fi
-
-    local LOG_DIR="/var/log/ansible_cron"
-    sudo mkdir -p "$LOG_DIR"
-    sudo chown "$TARGET_USER" "$LOG_DIR"
-
-    _translate_schedule() {
-        local m=$1 h=$2 dom=$3 mon=$4 dow=$5
-        if [[ "$m" == "*" && "$h" == "*" ]]; then echo "Toutes les minutes"
-        elif [[ "$m" =~ ^\*/([0-9]+) ]]; then echo "Toutes les ${BASH_REMATCH[1]} min"
-        elif [[ "$dow" != "*" && "$dom" == "*" ]]; then echo "Hebdo (J: $dow) à $h:$m"
-        elif [[ "$dom" != "*" ]]; then echo "Mensuel (Le $dom) à $h:$m"
-        else echo "$m $h $dom $mon $dow"; fi
-    }
-
-    _ask_schedule() {
-         echo -e "${GREY}Format: Minute Heure JourMois Mois JourSemaine${NC}"
-         read -p "Planning (ex: '0 2 * * *' pour 2h00 matin) : " sched
-         if [ -z "$sched" ]; then sched="0 2 * * *"; fi
-         RES_SCHEDULE="$sched"
-    }
-
-    _list_tasks() {
-        echo -e "\n${BLUE}--- Tâches ($TARGET_USER) ---${NC}"
-        sudo -u "$TARGET_USER" crontab -l 2>/dev/null | grep "ansible-playbook" | while read -r line; do
-             echo "$line" | sed "s|$ANSIBLE_ROOT/playbooks/||" | cut -c1-60
+        mkdir -p "$target"/{tasks,handlers,defaults,vars,templates,files,meta}
+        for d in tasks handlers defaults vars meta; do
+            echo "---" > "$target/$d/main.yml"
         done
-        echo ""
+
+        echo -e "${GREEN}✅ Structure créée dans roles/$rname${NC}"
+
+        read -p "Créer un playbook pour lancer ce rôle ? (o/n) " cp
+        if [ "$cp" == "o" ]; then
+            pb_file="$PLAYBOOKS_DIR/deploy_$rname.yml"
+            cat > "$pb_file" <<EOF
+---
+- name: Deploiement de $rname
+  hosts: all
+  become: yes
+  roles:
+    - $rname
+EOF
+            echo -e "${GREEN}✅ Playbook créé : playbooks/deploy_$rname.yml${NC}"
+        fi
+        pause
     }
 
-    _add_task() {
-        mapfile -t pbs < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -type f -name "*.yml" -printf "%f\n" | sort)
-        echo "Sélectionnez un playbook :"
-        local i=0
-        for p in "${pbs[@]}"; do echo "[$i] $p"; ((i++)); done
+    _create_playbook_wizard() {
+        echo -e "\n${CYAN}--- CRÉATION DE PLAYBOOK ---${NC}"
+        read -p "Nom du playbook (sans extension) : " pname
+        [ -z "$pname" ] && return
+        pname="${pname%.yml}.yml"
+        target="$PLAYBOOKS_DIR/$pname"
+
+        if [ -f "$target" ]; then echo -e "${RED}Fichier existant.${NC}"; pause; return; fi
+
+        cat > "$target" <<EOF
+---
+- name: Nouveau Playbook
+  hosts: all
+  become: yes
+  tasks:
+    - name: Test ping
+      ping:
+EOF
+        echo -e "${GREEN}✅ Fichier créé : $target${NC}"
+        read -p "L'éditer maintenant ? (o/n) " ed
+        [ "$ed" == "o" ] && nano "$target"
+    }
+
+    _select_role_target() {
+        mapfile -t roles < <(ls -1 "$ROLES_DIR")
+        if [ ${#roles[@]} -eq 0 ]; then echo "Aucun rôle trouvé."; return 1; fi
+        echo "Sélectionnez le rôle cible :"
+        for i in "${!roles[@]}"; do echo "[$i] ${roles[$i]}"; done
         read -p "> " idx
-        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#pbs[@]}" ]; then
-            local sel="${pbs[$idx]}"
-            _ask_schedule
-            read -p "Commentaire : " comm
-            
-            local cmd="cd $ANSIBLE_ROOT && /usr/bin/ansible-playbook playbooks/$sel >> $LOG_DIR/${sel}.log 2>&1"
-            local cron_line="$RES_SCHEDULE $cmd # $comm"
-            
-            (sudo -u "$TARGET_USER" crontab -l 2>/dev/null; echo "$cron_line") | sudo -u "$TARGET_USER" crontab -
-            echo -e "${GREEN}Tâche ajoutée.${NC}"
-        fi
-    }
-
-    _del_task() {
-        echo "Pour supprimer, il est conseillé d'éditer manuellement pour l'instant."
-        read -p "Ouvrir 'crontab -e' pour $TARGET_USER ? (o/n) " e
-        if [ "$e" == "o" ]; then sudo -u "$TARGET_USER" crontab -e; fi
-    }
-
-    while true; do
-        clear
-        echo -e "${BLUE}=== PLANIFICATEUR DE TÂCHES ===${NC}"
-        echo "User cible : $TARGET_USER"
-        echo "----------------------------"
-        echo "1. Lister les tâches"
-        echo "2. Ajouter une tâche"
-        echo "3. Éditer manuellement"
-        echo "r. Retour"
-        read -p "> " c
-        case $c in
-            1) _list_tasks; pause ;;
-            2) _add_task; pause ;;
-            3) _del_task ;;
-            r) return ;;
-        esac
-    done
-}
-
-# =======================================================
-# MODULE : GESTION DES SECRETS (Vault)
-# =======================================================
-module_vault() {
-    export EDITOR="/usr/bin/nano"
-    if [ ! -f "$VAULT_PASS_FILE" ]; then
-        echo -e "${RED}Erreur: .vault_pass introuvable.${NC}"; pause; return
-    fi
-
-    _select_vault_file() {
-        local prompt="$1"
-        mapfile -t files < <(find "$ANSIBLE_ROOT/group_vars" "$ANSIBLE_ROOT/inventory" -type f \( -name "*.yml" -o -name "*.yaml" \) 2>/dev/null | sort)
-        
-        echo -e "${BLUE}--- $prompt ---${NC}"
-        local i=0
-        for f in "${files[@]}"; do
-            local rel=${f#$ANSIBLE_ROOT/}
-            local status=""
-            if grep -q "\$ANSIBLE_VAULT" "$f"; then status="${GREEN}[LOCK]${NC}"; else status="${GREY}[OPEN]${NC}"; fi
-            echo -e "[$i] $rel $status"
-            ((i++))
-        done
-        read -p "Numéro : " idx
-        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
-            SELECTED_VAULT_FILE="${files[$idx]}"
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ -n "${roles[$idx]}" ]; then
+            SELECTED_ROLE="${roles[$idx]}"
             return 0
         fi
         return 1
     }
 
-    while true; do
-        clear
-        echo -e "${BLUE}=== GESTIONNAIRE DE SECRETS (VAULT) ===${NC}"
-        echo "1. Éditer (edit)"
-        echo "2. Chiffrer (encrypt)"
-        echo "3. Déchiffrer (decrypt)"
-        echo "4. Voir (view)"
-        echo "r. Retour"
-        read -p "> " c
-        case $c in
-            1) if _select_vault_file "ÉDITER"; then ansible-vault edit "$SELECTED_VAULT_FILE"; fi ;;
-            2) if _select_vault_file "CHIFFRER"; then ansible-vault encrypt "$SELECTED_VAULT_FILE"; pause; fi ;;
-            3) if _select_vault_file "DÉCHIFFRER"; then ansible-vault decrypt "$SELECTED_VAULT_FILE"; pause; fi ;;
-            4) if _select_vault_file "VOIR"; then ansible-vault view "$SELECTED_VAULT_FILE" | less; fi ;;
-            r) return ;;
-        esac
-    done
-}
-
-# =======================================================
-# MODULE : INVENTAIRE (Inventory)
-# =======================================================
-module_inventory() {
-    cd "$ANSIBLE_ROOT" || return
-    while true; do
-        clear
-        echo -e "${BLUE}=== EXPLORATEUR D'INVENTAIRE ===${NC}"
-        echo "1. Graphique des groupes (Graph)"
-        echo "2. Liste simple des hôtes"
-        echo "3. Tester le PING (tous)"
-        echo "4. Voir les variables (Setup)"
-        echo "r. Retour"
-        read -p "> " c
-        case $c in
-            1) ansible-inventory --graph; pause ;;
-            2) ansible-inventory --list | grep "ansible_host" -B 5 | less ;;
-            3) ansible all -m ping; pause ;;
-            4) 
-               read -p "Nom de la machine : " h
-               [ -n "$h" ] && ansible "$h" -m setup | less
-               ;;
-            r) return ;;
-        esac
-    done
-}
-
-# =======================================================
-# MODULE : GÉNÉRATEUR DE RÔLE
-# =======================================================
-module_create_role() {
-    echo -e "\n${GREEN}>>> Générateur de Rôle Ansible${NC}"
-    read -p "Nom du nouveau rôle (ex: docker) : " role_name
-    
-    if [ -z "$role_name" ]; then echo "Annulé."; sleep 1; return; fi
-
-    local target="$ANSIBLE_ROOT/roles/$role_name"
-    if [ -d "$target" ]; then echo -e "${RED}Le rôle existe déjà.${NC}"; pause; return; fi
-
-    mkdir -p "$target"/{tasks,handlers,defaults,templates,files,vars,meta}
-    echo "---" > "$target/tasks/main.yml"
-    echo "---" > "$target/handlers/main.yml"
-    echo "---" > "$target/defaults/main.yml"
-    echo -e "${GREEN}✅ Rôle créé dans : $target${NC}"
-    pause
-}
-
-# =======================================================
-# MODULE : SHELL RESTREINT (Jail)
-# =======================================================
-module_jail() {
-    local JAIL_ROOT="$ANSIBLE_ROOT"
-    
-    echo -e "\n${GREEN}>>> OUVERTURE DU SHELL RESTREINT${NC}"
-    echo -e "    Périmètre : ${YELLOW}$JAIL_ROOT${NC}"
-    echo -e "${GREY}Tapez 'exit' pour revenir au menu.${NC}"
-    
-    cd "$JAIL_ROOT" || return
-    trap - SIGINT SIGQUIT SIGTSTP
-
-    local RC_FILE=$(mktemp)
-    cat > "$RC_FILE" <<EOF
-        unalias -a
-        export PS1='\[\033[01;33m\][RESTRICTED]\[\033[00m\] \w\$ '
-        cd() {
-            if [ -z "\$1" ]; then builtin cd "$JAIL_ROOT"; return; fi
-            builtin cd "\$1"
-            if [[ "\$PWD" != "$JAIL_ROOT"* ]]; then
-                echo "⛔ Sortie du périmètre interdite."
-                builtin cd "$JAIL_ROOT"
-            fi
-        }
-EOF
-    bash --rcfile "$RC_FILE"
-    rm "$RC_FILE"
-    trap '' SIGINT SIGQUIT SIGTSTP
-}
-
-# =======================================================
-# MODULE : PARE-FEU (Firewall UFW)
-# =======================================================
-module_firewall() {
-    while true; do
-        clear
-        local st_txt="${RED}INACTIF${NC}"
-        if sudo ufw status | grep -q "active"; then st_txt="${GREEN}ACTIF${NC}"; fi
+    _add_task_wizard() {
+        echo -e "\n${CYAN}--- AJOUT DE TÂCHE (Action) ---${NC}"
+        _select_role_target || { pause; return; }
         
-        echo -e "${BLUE}=== GESTION PARE-FEU UFW ($st_txt) ===${NC}"
-        echo "1. Voir les règles"
-        echo "2. Ouvrir un port"
-        echo "3. Supprimer une règle"
-        echo "4. Activer"
-        echo "5. Désactiver"
-        echo "r. Retour"
-        read -p "> " c
-
-        case $c in
-            1) run_as_root $CMD_UFW status numbered; pause ;;
-            2) 
-                read -p "Port/Proto (ex: 80/tcp) : " p
-                [ -n "$p" ] && run_as_root $CMD_UFW allow "$p" && pause
-                ;;
-            3)
-                run_as_root $CMD_UFW status numbered
-                read -p "Numéro de la règle à supprimer : " n
-                [ -n "$n" ] && run_as_root $CMD_UFW delete "$n" && pause
-                ;;
-            4) run_as_root $CMD_UFW enable; pause ;;
-            5) run_as_root $CMD_UFW disable; pause ;;
-            r) return ;;
+        echo "Dossier cible ?"
+        echo "1. tasks (Actions principales)"
+        echo "2. handlers (Actions sur notification)"
+        read -p "> " dchoice
+        
+        case "$dchoice" in
+            1) target_file="$ROLES_DIR/$SELECTED_ROLE/tasks/main.yml" ;;
+            2) target_file="$ROLES_DIR/$SELECTED_ROLE/handlers/main.yml" ;;
+            *) return ;;
         esac
-    done
-}
 
-# =======================================================
-# MODULE : SYSTÈME (Updates & Power)
-# =======================================================
-module_updates() {
+        echo -e "\n${YELLOW}Ajout à la fin de $target_file${NC}"
+        read -p "Nom de la tâche : " tname
+        read -p "Module (ex: apt, copy, service) : " tmod
+        
+        echo "" >> "$target_file"
+        echo "- name: $tname" >> "$target_file"
+        echo "  $tmod:" >> "$target_file"
+        echo "    # TODO: arguments pour $tmod" >> "$target_file"
+        
+        echo -e "${GREEN}✅ Squelette ajouté.${NC}"
+        read -p "Éditer pour compléter ? (o/n) " ed
+        [ "$ed" == "o" ] && nano "$target_file"
+    }
+
+    _add_var_wizard() {
+        echo -e "\n${CYAN}--- AJOUT DE VARIABLE (Config) ---${NC}"
+        _select_role_target || { pause; return; }
+        
+        echo "Dossier cible ?"
+        echo "1. defaults (Valeurs par défaut)"
+        echo "2. vars (Priorité haute)"
+        read -p "> " dchoice
+        
+        case "$dchoice" in
+            1) target_file="$ROLES_DIR/$SELECTED_ROLE/defaults/main.yml" ;;
+            2) target_file="$ROLES_DIR/$SELECTED_ROLE/vars/main.yml" ;;
+            *) return ;;
+        esac
+
+        echo -e "\n${YELLOW}Ajout dans $target_file${NC}"
+        read -p "Nom variable (ex: port_http) : " vname
+        read -p "Valeur : " vval
+        
+        echo "" >> "$target_file"
+        echo "$vname: $vval" >> "$target_file"
+        echo -e "${GREEN}✅ Ajouté.${NC}"
+        sleep 1
+    }
+
+    _delete_wizard() {
+        echo -e "\n${RED}--- SUPPRESSION ---${NC}"
+        echo "1. Supprimer un Rôle"
+        echo "2. Supprimer un Playbook"
+        read -p "> " delc
+        
+        case "$delc" in
+            1)
+                _select_role_target || { pause; return; }
+                read -p "Supprimer DÉFINITIVEMENT '$SELECTED_ROLE' ? (oui/non) " c
+                if [ "$c" == "oui" ]; then rm -rf "$ROLES_DIR/$SELECTED_ROLE"; echo "Fait."; pause; fi
+                ;;
+            2)
+                mapfile -t pbs < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n")
+                if [ ${#pbs[@]} -eq 0 ]; then echo "Vide."; pause; return; fi
+                for i in "${!pbs[@]}"; do echo "[$i] ${pbs[$i]}"; done
+                read -p "Numéro : " idx
+                if [[ "$idx" =~ ^[0-9]+$ ]] && [ -n "${pbs[$idx]}" ]; then
+                    p="${pbs[$idx]}"
+                    read -p "Supprimer '$p' ? (oui/non) " c
+                    if [ "$c" == "oui" ]; then rm "$PLAYBOOKS_DIR/$p"; echo "Fait."; pause; fi
+                fi
+                ;;
+        esac
+    }
+
     while true; do
         clear
-        echo -e "${BLUE}=== MISES À JOUR SYSTÈME ===${NC}"
-        echo "1. Update & Upgrade (Standard)"
-        echo "2. Nettoyage (Autoremove)"
-        echo "3. Dist-Upgrade (Complet)"
-        echo "r. Retour"
+        echo -e "${BLUE}=== ASSISTANT DÉVELOPPEMENT ===${NC}"
+        echo -e "  ${GREEN}1.${NC} ✨ Créer un nouveau Rôle"
+        echo -e "  ${GREEN}2.${NC} 📄 Créer un nouveau Playbook"
+        echo "-----------------------------------"
+        echo -e "  ${YELLOW}3.${NC} ➕ Ajouter une Tâche (Action)"
+        echo -e "  ${YELLOW}4.${NC} 💲 Ajouter une Variable (Config)"
+        echo "-----------------------------------"
+        echo -e "  ${RED}5.${NC} 🗑️  Supprimer (Rôle ou Playbook)"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo ""
         read -p "> " c
-        case $c in
-            1) run_as_root apt update && run_as_root apt upgrade -y; pause ;;
-            2) run_as_root apt autoremove -y; pause ;;
-            3) run_as_root apt dist-upgrade -y; pause ;;
-            r) return ;;
+        case "$c" in
+            1) _create_role_wizard ;;
+            2) _create_playbook_wizard ;;
+            3) _add_task_wizard ;;
+            4) _add_var_wizard ;;
+            5) _delete_wizard ;;
+            0) return ;;
         esac
     done
 }
 
-module_power() {
-    local action="$1"
-    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : Vous allez $action le serveur.${NC}"
-    read -p "Tapez 'confirmer' pour exécuter : " input
-    if [ "$input" == "confirmer" ]; then
-        if [ "$action" == "ETEINDRE" ]; then run_as_root poweroff; fi
-        if [ "$action" == "REDEMARRER" ]; then run_as_root reboot; fi
-    else
-        echo "Annulé."
+# =======================================================
+# MODULE : SAUVEGARDE & GIT
+# =======================================================
+module_backup_git() {
+    cd "$ANSIBLE_ROOT" || return
+
+    _backup_local() {
+        if ! ask_sudo_gui; then return; fi
+        D=$(date +%Y%m%d_%H%M%S)
+        FILE="$BACKUP_DIR/ansible_backup_$D.tar.gz"
+        
+        sudo mkdir -p "$BACKUP_DIR"
+        echo -e "${CYAN}Création de l'archive locale...${NC}"
+        tar --exclude='.git' --exclude='*.retry' -czf "/tmp/ansible_temp.tar.gz" .
+        sudo mv "/tmp/ansible_temp.tar.gz" "$FILE"
+        echo -e "${GREEN}✅ Sauvegarde réussie :${NC} $FILE"
+        pause
+    }
+
+    _config_git() {
+        ensure_git || return
+        echo -e "\n${CYAN}--- CONFIGURATION GIT ---${NC}"
+        if [ ! -d ".git" ]; then git init; else echo "Dépôt déjà initialisé."; fi
+
+        cuser=$(git config user.name)
+        if [ -z "$cuser" ]; then
+            read -p "Votre Nom : " gname
+            read -p "Votre Email : " gemail
+            git config user.name "$gname"
+            git config user.email "$gemail"
+        fi
+
+        cremote=$(git remote get-url origin 2>/dev/null)
+        if [ -z "$cremote" ]; then
+            read -p "URL dépôt (https/ssh) : " gurl
+            [ -n "$gurl" ] && git remote add origin "$gurl"
+        else
+            echo -e "Remote : ${GREY}$cremote${NC}"
+            read -p "Changer URL ? (o/n) " chg
+            if [ "$chg" == "o" ]; then
+                read -p "Nouvelle URL : " nurl
+                git remote set-url origin "$nurl"
+            fi
+        fi
+        pause
+    }
+
+    _push_git() {
+        ensure_git || return
+        if [ ! -d ".git" ]; then echo -e "${RED}Pas de dépôt git.${NC}"; pause; return; fi
+
+        # Vérification Config Utilisateur
+        if [ -z "$(git config user.email)" ]; then
+            echo -e "${RED}Erreur : Identité Git non configurée.${NC}"
+            read -p "Email Git : " ge
+            read -p "Nom Git : " gn
+            git config user.email "$ge"
+            git config user.name "$gn"
+        fi
+
+        echo -e "\n${CYAN}--- SYNCHRONISATION GITHUB ---${NC}"
+        
+        echo -e "${GREY}Vérification distante (fetch)...${NC}"
+        git fetch origin > /dev/null 2>&1
+
+        # 1. Vérification des changements locaux
+        git update-index -q --refresh
+        STATUS_PORCELAIN=$(git status --porcelain)
+        NEEDS_PUSH=0
+
+        if [ -n "$STATUS_PORCELAIN" ]; then
+            echo -e "${YELLOW}⚠️  Modifications locales détectées :${NC}"
+            git status -s
+            echo ""
+            read -p "Créer un COMMIT maintenant ? (o/n) " conf
+            if [ "$conf" == "o" ]; then
+                read -p "Message commit : " msg
+                [ -z "$msg" ] && msg="Update via Ansible Manager $(date)"
+                git add -A
+                if git commit -m "$msg"; then
+                    echo -e "${GREEN}Commit créé.${NC}"
+                    NEEDS_PUSH=1
+                else
+                    echo -e "${RED}Erreur lors du commit.${NC}"; pause; return
+                fi
+            fi
+        else
+            echo -e "${GREEN}Aucun fichier en attente de commit.${NC}"
+        fi
+
+        # 2. Vérification Ahead
+        CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+        UNPUSHED_COUNT=$(git rev-list origin/$CURRENT_BRANCH..HEAD --count 2>/dev/null)
+        
+        if [ -n "$UNPUSHED_COUNT" ] && [ "$UNPUSHED_COUNT" -gt 0 ]; then
+            echo -e "\n${YELLOW}Vous avez $UNPUSHED_COUNT commit(s) prêts à être envoyés.${NC}"
+            NEEDS_PUSH=1
+        fi
+
+        # 3. Action Push avec gestion "Premier Push"
+        if [ "$NEEDS_PUSH" == "1" ]; then
+            echo ""
+            read -p "Envoyer vers GitHub (Push) ? (o/n) " cp
+            if [ "$cp" == "o" ]; then
+                echo -e "${CYAN}Tentative de Push vers origin/$CURRENT_BRANCH...${NC}"
+                
+                # On essaie le push standard d'abord
+                if git push origin "$CURRENT_BRANCH" 2>/dev/null; then
+                    echo -e "${GREEN}✅ Push réussi.${NC}"
+                else
+                    # CAS : Premier push ou branche upstream manquante
+                    echo -e "${YELLOW}⚠️  Le push standard a échoué (Probablement pas de branche amont).${NC}"
+                    echo -e "Nous allons configurer la branche principale."
+                    
+                    read -p "Nom de la branche (par défaut: main) : " target_branch
+                    [ -z "$target_branch" ] && target_branch="main"
+
+                    echo -e "${GREY}1. Renommage de la branche locale en '$target_branch'...${NC}"
+                    git branch -M "$target_branch"
+
+                    # Vérification si remote existe, sinon on redemande (sécurité)
+                    if ! git remote get-url origin >/dev/null 2>&1; then
+                        read -p "URL du dépôt distant : " remote_url
+                        git remote add origin "$remote_url"
+                    fi
+
+                    echo -e "${GREY}2. Push et définition de l'upstream...${NC}"
+                    if git push -u origin "$target_branch"; then
+                        echo -e "${GREEN}✅ Push réussi et branche configurée !${NC}"
+                    else
+                        echo -e "${RED}❌ Échec du push. Vérifiez vos accès.${NC}"
+                    fi
+                fi
+            else
+                echo "Push reporté."
+            fi
+        else
+            if [ -z "$STATUS_PORCELAIN" ]; then
+                echo -e "${GREEN}✅ Tout est synchronisé.${NC}"
+            fi
+        fi
+        pause
+    }
+
+    while true; do
+        clear
+        echo -e "${BLUE}=== SAUVEGARDES & GIT ===${NC}"
+        echo -e "  ${GREEN}1.${NC} 💾 Sauvegarde Locale (Tar.gz)"
+        echo -e "  ${GREEN}2.${NC} ⚙️  Configurer Dépôt GitHub"
+        echo -e "  ${GREEN}3.${NC} 🚀 Synchroniser (Push)"
+        echo -e "  ${RED}0.${NC} Retour"
+        echo ""
+        read -p "> " c
+        case "$c" in
+            1) _backup_local ;;
+            2) _config_git ;;
+            3) _push_git ;;
+            0) return ;;
+        esac
+    done
+}
+
+# =======================================================
+# MODULES SIMPLES (Launcher, Cron, etc.)
+# =======================================================
+module_launcher() {
+    cd "$ANSIBLE_ROOT" || return
+    _get_desc() {
+        local f="$1"
+        local d=$(grep "^$f|" "$DESC_FILE" 2>/dev/null | cut -d'|' -f2-)
+        [ -n "$d" ] && echo "$d" || echo "${GREY}Sans description${NC}"
+    }
+
+    mapfile -t files < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n" | sort)
+    if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun playbook.${NC}"; pause; return; fi
+
+    local i=0
+    echo -e "${BLUE}--- SÉLECTIONNER UN PLAYBOOK ---${NC}"
+    for f in "${files[@]}"; do
+        printf "%-3s | %-25s | %s\n" "[$i]" "${f:0:25}" "$(_get_desc "$f")"
+        ((i++))
+    done
+    
+    echo "0. Retour"
+    read -p "Numéro : " idx
+    if [ "$idx" == "0" ]; then return; fi
+    if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
+        sel="${files[$idx]}"
+        echo -e "\n${GREEN}>>> Lancement de $sel${NC}"
+        ansible-playbook "$PLAYBOOKS_DIR/$sel"
         pause
     fi
 }
 
+module_cron() {
+    if ! ask_sudo_gui; then return; fi
+    while true; do
+        clear; echo -e "${BLUE}=== CRON ===${NC}"
+        echo "1. Éditer crontab root"
+        echo "2. Lister crontab root"
+        echo "0. Retour"
+        read -p "> " c
+        case $c in
+            1) sudo crontab -e ;;
+            2) sudo crontab -l; pause ;;
+            0) return ;;
+        esac
+    done
+}
+
+module_vault() {
+    export EDITOR="/usr/bin/nano"
+    if [ ! -f "$VAULT_PASS_FILE" ]; then echo "Pas de fichier .vault_pass"; pause; return; fi
+    while true; do
+        clear; echo -e "${BLUE}=== VAULT ===${NC}"
+        echo "1. Encrypt File"
+        echo "2. Decrypt File"
+        echo "3. Edit Encrypted File"
+        echo "0. Retour"
+        read -p "> " c
+        case $c in
+            1) read -p "File: " f; ansible-vault encrypt "$f"; pause ;;
+            2) read -p "File: " f; ansible-vault decrypt "$f"; pause ;;
+            3) read -p "File: " f; ansible-vault edit "$f"; ;;
+            0) return ;;
+        esac
+    done
+}
+
+module_inventory() {
+    while true; do
+        clear; echo -e "${BLUE}=== INVENTAIRE ===${NC}"
+        echo "1. Graphique"
+        echo "2. Liste"
+        echo "3. Ping All"
+        echo "0. Retour"
+        read -p "> " c
+        case $c in
+            1) ansible-inventory --graph; pause ;;
+            2) ansible-inventory --list; pause ;;
+            3) ansible all -m ping; pause ;;
+            0) return ;;
+        esac
+    done
+}
+
+module_jail() {
+    echo -e "\n${GREEN}Shell Restreint dans $ANSIBLE_ROOT${NC}"
+    echo "Tapez 'exit' pour sortir."
+    bash --rcfile <(echo "PS1='(Jail) \w\$ '; cd $ANSIBLE_ROOT")
+}
+
+module_firewall() {
+    if ! ask_sudo_gui; then return; fi
+    while true; do
+        clear; echo -e "${BLUE}=== UFW ===${NC}"
+        sudo ufw status numbered
+        echo "----------------"
+        echo "1. Allow Port"
+        echo "2. Delete Rule"
+        echo "0. Retour"
+        read -p "> " c
+        case $c in
+            1) read -p "Port: " p; sudo ufw allow "$p"; pause ;;
+            2) read -p "Num: " n; sudo ufw delete "$n"; pause ;;
+            0) return ;;
+        esac
+    done
+}
+
+module_updates() {
+    if ask_sudo_gui; then
+        sudo apt update && sudo apt upgrade -y
+        pause
+    fi
+}
+
+module_power() {
+    local a="$1"
+    if [ "$a" == "ETEINDRE" ]; then sudo poweroff; fi
+    if [ "$a" == "REDEMARRER" ]; then sudo reboot; fi
+}
+
 open_user_shell() {
     if ! ask_sudo_gui; then return; fi
-    echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir."
-    # On désactive le piège (trap) pour autoriser Ctrl+C / Ctrl+Z dans le shell admin
+    echo -e "\n${GREEN}🔓 Console Admin.${NC} 'exit' pour revenir."
     trap - SIGINT SIGQUIT SIGTSTP
     export SKIP_KIOSK=1
-    
     cd "$ANSIBLE_ROOT" || cd "$HOME"
     bash --login
-    
     unset SKIP_KIOSK
-    # On réactive le piège pour empêcher la fermeture du script après le retour
     trap '' SIGINT SIGQUIT SIGTSTP
 }
 
 # =======================================================
-# MENU PRINCIPAL (BOUCLE INFINIE)
+# MENU PRINCIPAL (Main Loop)
 # =======================================================
 SEP="${BLUE}------------------------------------------------${NC}"
 SEP_RED="${RED}------------------------------------------------${NC}"
 
-while true;
-do
+while true; do
     clear
-    # Collecte des infos système
     get_sys_info
     
-    # --- EN-TÊTE AVEC CADRE BLEU ---
+    # Header
     echo -e "${BLUE}#################################${NC}"
     echo -e "${BLUE}#       ANSIBLE MANAGER         #${NC}"
     echo -e "${BLUE}#################################${NC}"
@@ -512,67 +583,53 @@ do
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
     printf "  🏠 LAN: ${YELLOW}%-23s${NC} | 🌍 WAN: ${YELLOW}%s${NC}\n" "$LOCAL_IP" "$PUBLIC_IP"
-    
     echo -e "$SEP"
-
-    # --- INFO SERVICE (Correction alignement avec couleurs) ---
-    # On utilise %-20s pour compenser les caractères ANSI invisibles (~11 chars)
-    # SX et APP_VER contiennent des couleurs, donc leur longueur "réelle" est > longueur visible
     printf "  ⏰ Automate : %-20b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
     printf "  ℹ️  Ansible  : %-20s | 📁 Racine    : %s\n" "${CYAN}$APP_VER${NC}" "$(basename "$ANSIBLE_HOME")"
-
     echo -e "$SEP"
 
-    # --- MENU : AUTOMATISATION ---
-    echo -e " ${BOLD}${CYAN}🤖 AUTOMATISATION${NC}"
-    echo -e "    ${GREEN}1.${NC} 🚀 Lancer un Playbook"
-    echo -e "    ${GREEN}2.${NC} ⏰ Gérer les Tâches Cron"
-    echo -e "    ${GREEN}3.${NC} 🔐 Gestion des Secrets (Vault)"
+    # --- SECTION DÉVELOPPEMENT & AUTOMATISATION ---
+    echo -e " ${BOLD}${CYAN}🚀 DÉVELOPPEMENT & OPÉRATIONS${NC}"
+    echo -e "    ${GREEN}1.${NC} 🧙 Assistant Création (Rôles/Tasks/Config)"
+    echo -e "    ${GREEN}2.${NC} ▶️  Lancer un Playbook"
+    echo -e "    ${GREEN}3.${NC} 💾 Sauvegardes & Git (Backup/Push)"
+    echo -e "    ${GREEN}4.${NC} 🔐 Gestion des Secrets (Vault)"
     echo ""
 
-    # --- MENU : OUTILS ---
-    echo -e " ${BOLD}${CYAN}🛠️  OUTILS & PARAMÈTRES${NC}"
-    echo -e "    ${GREEN}4.${NC} 🌍 Explorateur d'Inventaire"
-    echo -e "    ${GREEN}5.${NC} 🔒 Explorateur Fichiers (Jail)"
-    echo -e "    ${GREEN}6.${NC} ➕ Créer un nouveau Rôle"
+    # --- SECTION OUTILS ---
+    echo -e " ${BOLD}${CYAN}🛠️  OUTILS${NC}"
+    echo -e "    ${GREEN}5.${NC} 🌍 Inventaire"
+    echo -e "    ${GREEN}6.${NC} ⏰ Tâches Cron"
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
-    echo -e "    ${GREEN}8.${NC} 🚀 Mises à jour (App & OS)"
-
+    echo -e "    ${GREEN}8.${NC} 🔒 Shell Restreint (Jail)"
+    echo -e "    ${GREEN}9.${NC} 📦 Mises à jour Système"
+    
     echo -e "$SEP_RED"
-
-    # --- MENU : SYSTÈME (Danger) ---
-    echo -e " ${BOLD}${RED}💀 ZONES SYSTÈME${NC}"
-    echo -e "    ${RED}9.${NC} 🔌 Éteindre le serveur"
-    echo -e "    ${RED}10.${NC}♻️  Redémarrer le serveur"
-
+    
+    # --- SECTION SYSTÈME ---
+    echo -e " ${BOLD}${RED}💀 SYSTÈME${NC}"
+    echo -e "    ${RED}10.${NC}🔌 Éteindre"
+    echo -e "    ${RED}11.${NC}♻️  Redémarrer"
     echo -e "$SEP"
-
-    # --- PIED DE PAGE ---
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin    |    [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
 
     read -r -p "  Votre choix > " choice
 
     case "$choice" in
-        1) module_launcher ;;
-        2) module_cron ;;
-        3) module_vault ;;
-        4) module_inventory ;;
-        5) module_jail ;;
-        6) module_create_role ;;
+        1) module_assistant_dev ;;
+        2) module_launcher ;;
+        3) module_backup_git ;;
+        4) module_vault ;;
+        5) module_inventory ;;
+        6) module_cron ;;
         7) module_firewall ;;
-        8) module_updates ;;
-        9) module_power "ETEINDRE" ;;
-        10) module_power "REDEMARRER" ;;
+        8) module_jail ;;
+        9) module_updates ;;
+        10) module_power "ETEINDRE" ;;
+        11) module_power "REDEMARRER" ;;
         admin) open_user_shell ;;
-        exit|quit|q)
-            echo "Au revoir."
-            kill -9 $PPID 2>/dev/null
-            exit 0 
-            ;;
-        *) 
-            echo "Choix invalide."
-            sleep 0.5 
-            ;;
+        exit|q) echo "Bye."; exit 0 ;;
+        *) echo "Choix invalide."; sleep 0.5 ;;
     esac
 done
