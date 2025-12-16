@@ -21,7 +21,7 @@ Ajoutez ces règles (en remplaçant `%grp_utilisateur_linux-ssh` par votre group
 %grp_utilisateur_linux-ssh ALL=(ALL) NOPASSWD: /usr/bin/mysql -u root -e *
 ```
 
-##Dépendances
+## Dépendances
 
 * mariadb-server (ou mysql-server)
 * ufw
