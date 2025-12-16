@@ -1,7 +1,7 @@
 #!/bin/bash
-# =================================
+# ================================
 #  MANAGER ANSIBLE
-# =================================
+# ================================
 
 # --- CONFIGURATION ---
 export ANSIBLE_ROOT_RAW="${ANSIBLE_ROOT:-$HOME/ansible}"
@@ -183,108 +183,88 @@ menu_system_update() {
     done
 }
 
-# --- GESTION PARE-FEU (NOUVELLE INTERFACE) ---
+# --- GESTION PARE-FEU UNIFIÉE ---
+
+firewall_checkbox_delete() {
+    mapfile -t RULES < <(run_sudo $CMD_UFW status numbered | grep "^\[")
+    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
+
+    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
+
+    while true; do
+        clear
+        echo -e "${RED}${BOLD}SUPPRESSION RÈGLES (Cochez pour supprimer)${NC}"
+        for i in "${!RULES[@]}"; do
+            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+            DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
+            if [ "${SEL[$i]}" == "true" ]; then M="${RED}[X]${NC}"; else M="${GREEN}[ ]${NC}"; fi
+            printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
+        done
+        echo "------------------------------------------------"
+        echo -e "  [Num] Basculer | [a] Tout | [n] Rien"
+        echo -e "  [v]   VALIDER | [r] Retour"
+        read -r -p "> " k
+
+        if [[ "$k" =~ ^[0-9]+$ ]]; then
+            for i in "${!RULES[@]}"; do
+                rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                if [ "$rn" == "$k" ]; then
+                    if [ "${SEL[$i]}" == "true" ]; then SEL[$i]=false; else SEL[$i]=true; fi
+                fi
+            done
+        elif [ "$k" == "v" ]; then
+            declare -a DELS
+            for i in "${!RULES[@]}"; do
+                if [ "${SEL[$i]}" == "true" ]; then
+                    rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                    DELS+=("$rn")
+                fi
+            done
+            if [ ${#DELS[@]} -gt 0 ]; then
+                if ask_sudo_gui; then
+                    SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
+                    for n in $SORTED; do echo "Suppression règle #$n..."; yes | sudo $CMD_UFW delete "$n" >/dev/null; done
+                    echo -e "${GREEN}Terminé.${NC}"; pause; break
+                fi
+            else echo "Aucune sélection."; pause; fi
+        elif [ "$k" == "r" ]; then break
+        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
+        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
+        fi
+    done
+}
 
 firewall_manager() {
     while true; do
         clear
-        if run_sudo_silent ufw status | grep -q "active"; then 
-            ST="${GREEN}ACTIF${NC}"
-        else 
-            ST="${RED}INACTIF${NC}"
-        fi
-        
+        if run_sudo_silent $CMD_UFW status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
         echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-
-        mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-        if [ ${#RULES[@]} -eq 0 ]; then 
-            echo -e "${GREY}   (Aucune règle)${NC}"
-        else
-            echo "   RÈGLES :"
-            for line in "${RULES[@]}"; do
-                c_line=$(echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/g" | sed "s/DENY/${RED}DENY${NC}/g")
-                echo "   $c_line"
+        
+        mapfile -t RULES < <(run_sudo $CMD_UFW status numbered | grep "^\[")
+        if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
+            for line in "${RULES[@]}"; do 
+                echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
             done
         fi
         
         echo "------------------------------------------------"
-        echo -e "  ${GREEN}1.${NC} ➕ Ajouter un port"
-        echo -e "  ${GREEN}2.${NC} 🗑️  Supprimer (Checkbox)"
-        echo -e "  ${GREEN}3.${NC} ⚡ Activer"
-        echo -e "  ${RED}4.${NC} 🛑 Désactiver"
-        echo -e "  ${YELLOW}5.${NC} 🔑 Ouvrir SSH (22)"
+        echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
+        echo -e "  ${GREEN}2.${NC} ➕ Ouvrir Port Manuel"
+        echo -e "  ${GREEN}3.${NC} ⚡ Activer UFW (Enable)"
+        echo -e "  ${RED}4.${NC} 🗑️  Supprimer des règles (Sélection)"
+        echo -e "  ${RED}5.${NC} 🛑 Désactiver UFW (Disable)"
         echo "------------------------------------------------"
-        echo -e "  ${RED}r.${NC} Retour"
-        read -r -p "Choix > " u
+        echo -e "  ${RED}0.${NC} 🔙 Retour au menu principal"
+        read -r -p "Choix > " c
 
-        case "$u" in
-            1) 
-                read -p "Port : " p
-                [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi 
-                ;;
-            2) firewall_checkbox_mode ;;
-            3) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
-            4) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
-            5) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "OK"; pause; fi ;;
-            r) return ;;
+        case "$c" in
+            1) if ask_sudo_gui; then run_sudo $CMD_UFW allow 22/tcp; echo "OK"; pause; fi ;;
+            2) read -p "Port : " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo $CMD_UFW allow "$p"; pause; fi ;;
+            3) if ask_sudo_gui; then run_sudo $CMD_UFW enable; pause; fi ;;
+            4) firewall_checkbox_delete ;;
+            5) if ask_sudo_gui; then run_sudo $CMD_UFW disable; pause; fi ;;
+            0) return ;;
         esac
-    done
-}
-
-firewall_checkbox_mode() {
-    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-    if [ ${#RULES[@]} -eq 0 ]; then 
-        echo "Aucune règle."
-        pause
-        return 
-    fi
-    
-    declare -a SEL
-    for i in "${!RULES[@]}"; do SEL[$i]=false; done
-
-    while true; do
-        clear
-        echo -e "${RED}${BOLD}MODE SUPPRESSION${NC}"
-        printf "%-5s %-6s %-30s\n" "COCHE" "NUM" "RÈGLE"
-        
-        for i in "${!RULES[@]}"; do
-            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-            RAW_DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
-            DESC=$(echo "$RAW_DESC" | sed "s/ALLOW/${GREEN}ALLOW${NC}/g" | sed "s/DENY/${RED}DENY${NC}/g")
-            
-            if [ "${SEL[$i]}" == "true" ]; then 
-                M="${RED}[X]${NC}"
-            else 
-                M="${GREY}[ ]${NC}"
-            fi
-            printf " %b   %-6s %b\n" "$M" "#$NUM" "$DESC"
-        done
-        
-        echo "------------------------------------------------"
-        echo -e "  ${CYAN}[Num]${NC} Coche/Décoche | ${RED}[v]${NC} VALIDER | ${GREEN}[r]${NC} Retour"
-        read -r -p "> " k
-
-        if [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -ge 1 ] && [ "$k" -le "${#RULES[@]}" ]; then
-            idx=$((k-1))
-            [ "${SEL[$idx]}" == "true" ] && SEL[$idx]=false || SEL[$idx]=true
-        elif [ "$k" == "v" ]; then
-            if ask_sudo_gui; then
-                declare -a DELS
-                for i in "${!RULES[@]}"; do 
-                    [ "${SEL[$i]}" == "true" ] && DELS+=("$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)")
-                done
-                
-                SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
-                for n in $SORTED; do 
-                    yes | sudo ufw delete "$n" >/dev/null
-                done
-                echo -e "${GREEN}Terminé.${NC}"
-                pause
-                break
-            fi
-        elif [ "$k" == "r" ]; then 
-            break
-        fi
     done
 }
 
