@@ -1,0 +1,553 @@
+#!/bin/bash
+
+# =======================================================
+#  MANAGER SERVEUR WEB
+#  Debian | Nginx | UFW | Git | Backup | System Ops
+# =======================================================
+
+# --- CONFIGURATION ---
+DIR_WEB="/var/www"
+DIR_NGINX="/etc/nginx"
+DIR_PHP="/etc/php"
+BACKUP_DIR="/var/backups/nginx-manager"
+LOG_ACCESS="/var/log/nginx/access.log"
+LOG_ERROR="/var/log/nginx/error.log"
+
+SITES_AVAIL="$DIR_NGINX/sites-available"
+SITES_ENAB="$DIR_NGINX/sites-enabled"
+
+# Ajout pour la logique IP du Dashboard
+PUBLIC_IP_CACHE="/tmp/nginx_public_ip"
+LOCAL_IP=""
+PUBLIC_IP=""
+
+# --- SÉCURITÉ ---
+trap '' SIGINT SIGQUIT SIGTSTP
+
+# --- COULEURS ---
+BLUE=$'\033[0;34m'
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+GREY=$'\033[1;30m'
+NC=$'\033[0m'
+BOLD=$'\033[1m'
+
+# --- 1. FONCTIONS SYSTÈME DE BASE ---
+
+ask_sudo_gui() {
+    # On vérifie une dernière fois si sudo est déjà actif
+    if sudo -n true 2>/dev/null; then return 0; fi
+    
+    echo -e "\n${YELLOW}🔒 Authentification requise (Mot de passe Sudo)${NC}"
+    read -s -p "Mot de passe : " user_pass; echo ""
+    echo "$user_pass" | sudo -S -v 2>/dev/null
+    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
+}
+
+run_sudo() {
+    # 1. Tentative d'exécution directe SANS mot de passe
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
+    fi
+    
+    # 2. Si ça échoue, on vérifie si l'utilisateur a déjà une session sudo active globale
+    if sudo -n true 2>/dev/null; then
+        sudo "$@"
+        return $?
+    fi
+
+    # 3. Sinon, on demande le mot de passe via l'interface GUI texte
+    if ! ask_sudo_gui; then return 1; fi
+    sudo "$@"
+}
+
+pause() { echo ""; read -p "Appuyez sur Entrée pour continuer..."; }
+
+ensure_installed() {
+    local cmd="$1"
+    local pkg="$2"
+    if ! command -v "$cmd" &> /dev/null; then
+        echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
+        read -p "Installer '$pkg' maintenant ? (o/n) " i
+        if [[ "$i" == "o" ]]; then
+            if ask_sudo_gui; then
+                echo -e "${CYAN}Installation de $pkg...${NC}"
+                run_sudo apt-get update -qq
+                if run_sudo apt-get install -y "$pkg"; then
+                    echo -e "${GREEN}✅ Installé.${NC}"; return 0
+                else echo -e "${RED}❌ Échec.${NC}"; return 1; fi
+            fi
+        else echo -e "${RED}❌ Annulé.${NC}"; return 1; fi
+    fi
+    return 0
+}
+
+server_power_action() {
+    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $1 LE SYSTÈME${NC}"
+    read -p "Tapez 'confirmer' pour exécuter : " i
+    if [ "$i" == "confirmer" ]; then 
+        run_sudo $2
+        exit 0
+    else echo "Annulé."; pause; fi
+}
+
+get_remote_ip_managed() { # NOUVELLE FONCTION: Récupération IP publique avec cache
+    if [ -f "$PUBLIC_IP_CACHE" ]; then
+        LAST_MOD=$(stat -c %Y "$PUBLIC_IP_CACHE")
+        NOW=$(date +%s); DIFF=$((NOW - LAST_MOD))
+        if [ $DIFF -lt 3600 ]; then cat "$PUBLIC_IP_CACHE"; return; fi
+    fi
+    local PUB_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
+    if [[ "$PUB_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then 
+        echo "$PUB_IP" | tee "$PUBLIC_IP_CACHE"
+    else 
+        [ -f "$PUBLIC_IP_CACHE" ] && cat "$PUBLIC_IP_CACHE" || echo "N/A"
+    fi
+}
+
+get_sys_info() { # NOUVELLE FONCTION: Récupération des infos système
+    LOCAL_IP=$(hostname -I | awk '{print $1}')
+    PUBLIC_IP=$(get_remote_ip_managed)
+}
+
+# --- 2. CENTRE DE MISE À JOUR ---
+
+menu_system_update() {
+    while true; do
+        clear
+        echo -e "${BLUE}#############################################${NC}"
+        echo -e "${BLUE}#           CENTRE DE MISE À JOUR           #${NC}"
+        echo -e "${BLUE}#############################################${NC}"
+        echo ""
+        echo -e "${BOLD}SYSTÈME D'EXPLOITATION (OS) :${NC}"
+        echo -e "  ${CYAN}1.${NC} 🔄 Mise à jour paquets (apt update/upgrade)"
+        echo -e "  ${CYAN}2.${NC} 🧹 Nettoyage (autoremove & clean)"
+        echo -e "  ${CYAN}3.${NC} 🆙 Mise à niveau complète (apt dist-upgrade)"
+        echo -e "  ${CYAN}4.${NC} 📝 Éditer les dépôts (sources.list)"
+        echo "---------------------------------------------"
+        echo -e "  ${RED}0.${NC} 🔙 Retour"
+        echo "---------------------------------------------"
+        read -r -p "Choix > " uc
+
+        case "$uc" in
+            1) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- APT UPDATE ---${NC}"
+                   sudo apt-get update
+                   echo -e "\n${CYAN}--- APT UPGRADE ---${NC}"
+                   sudo apt-get upgrade -y
+                   echo -e "\n${GREEN}Fini.${NC}"; pause
+               fi 
+               ;;
+            2) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- NETTOYAGE (Autoremove) ---${NC}"
+                   sudo apt-get autoremove -y
+                   echo -e "\n${CYAN}--- NETTOYAGE (Clean) ---${NC}"
+                   sudo apt-get clean
+                   echo -e "\n${GREEN}Système nettoyé.${NC}"; pause
+               fi 
+               ;;
+            3) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- DIST-UPGRADE ---${NC}"
+                   sudo apt-get dist-upgrade -y
+                   echo -e "\n${GREEN}Fini.${NC}"; pause
+               fi 
+               ;;
+            4) 
+               if ask_sudo_gui; then run_sudo nano /etc/apt/sources.list; fi 
+               ;;
+            0) return ;;
+        esac
+    done
+}
+
+# --- 3. UFW & RESEAU ---
+
+scan_ports_and_update_ufw() {
+    local f="$1"; local a="$2"
+    [ ! -f "$f" ] && return
+    echo -e "${CYAN}🔍 Analyse ports config Nginx...${NC}"
+    
+    # On tente de lire sans sudo d'abord, puis avec sudo si échec
+    ports=$(cat "$f" 2>/dev/null | grep -E "^\s*listen" | grep -oE "[0-9]+" | sort -u)
+    if [ -z "$ports" ]; then ports=$(run_sudo cat "$f" 2>/dev/null | grep -E "^\s*listen" | grep -oE "[0-9]+" | sort -u); fi
+
+    [ -z "$ports" ] && return
+    for p in $ports; do
+        if [ "$a" == "allow" ]; then
+            echo -e "   ➡️  Open ${GREEN}$p${NC}"
+            run_sudo ufw allow "$p" >/dev/null
+        elif [ "$a" == "delete" ]; then
+            echo -e "${YELLOW}⚠️  Port $p détecté dans le fichier supprimé.${NC}"
+            read -p "   Fermer le port ? (o/n) : " c
+            [[ "$c" == "o" ]] && { run_sudo ufw delete allow "$p"; echo "   🚫 Fermé."; }
+        fi
+    done
+}
+
+firewall_checkbox_delete() {
+    # Pour 'ufw status numbered', si NOPASSWD est activé sur 'ufw status', run_sudo le passera sans mdp.
+    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
+    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
+    
+    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
+    
+    while true; do
+        clear; echo -e "${RED}${BOLD}SUPPRESSION UFW (Cochez pour supprimer)${NC}"
+        for i in "${!RULES[@]}"; do
+            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+            DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
+            if [ "${SEL[$i]}" == "true" ]; then M="${RED}[X]${NC}"; else M="${GREEN}[ ]${NC}"; fi
+            printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
+        done
+        echo "------------------------------------------------"
+        echo -e "  [Num] Basculer coche | [a] Tout | [n] Rien"
+        echo -e "  [v]   VALIDER SUPPRESSION"
+        echo -e "  [q]   Retour"
+        read -r -p "> " k
+        
+        if [[ "$k" =~ ^[0-9]+$ ]]; then
+            for i in "${!RULES[@]}"; do
+                rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                if [ "$rn" == "$k" ]; then 
+                    if [ "${SEL[$i]}" == "true" ]; then SEL[$i]=false; else SEL[$i]=true; fi
+                fi
+            done
+        elif [ "$k" == "v" ]; then
+            declare -a DELS
+            for i in "${!RULES[@]}"; do
+                if [ "${SEL[$i]}" == "true" ]; then
+                    rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
+                    DELS+=("$rn")
+                fi
+            done
+            if [ ${#DELS[@]} -gt 0 ]; then
+                # Suppression nécessite un mot de passe (sauf si NOPASSWD: ALL)
+                if ask_sudo_gui; then
+                    SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
+                    for n in $SORTED; do 
+                        echo "Suppression règle #$n..."
+                        yes | sudo ufw delete "$n" >/dev/null
+                    done
+                    echo -e "${GREEN}Terminé.${NC}"; pause; break
+                fi
+            else
+                echo "Aucune sélection."; pause
+            fi
+        elif [ "$k" == "q" ]; then break
+        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
+        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
+        fi
+    done
+}
+
+manage_ufw_clean() {
+    while true; do
+        clear
+        # Vérification statut sans mot de passe grâce à run_sudo modifié
+        if run_sudo ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
+        echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"
+        
+        if [[ "$ST" == *ACTIF* ]]; then 
+            echo "Règles actuelles :"
+            # Affichage sans mot de passe si configuré dans sudoers
+            run_sudo ufw status numbered | grep "^\["
+        fi
+        
+        echo "----------------------"
+        echo -e "  ${GREEN}1.${NC} 🌍 Ouvrir Web Standard (80, 443)"
+        echo -e "  ${GREEN}2.${NC} 🔑 Ouvrir SSH (22)"
+        echo -e "  ${GREEN}3.${NC} ➕ Ouvrir Port Manuel"
+        echo -e "  ${GREEN}4.${NC} ⚡ Activer UFW (Enable)"
+        echo -e "  ${RED}5.${NC} 🗑️  Supprimer des règles (Sélection)"
+        echo -e "  ${RED}6.${NC} 🛑 Désactiver UFW (Disable)"
+        echo "----------------------"
+        echo -e "  ${RED}0.${NC} Retour"
+        read -r -p "> " u
+        case "$u" in
+            1) if ask_sudo_gui; then run_sudo ufw allow 80/tcp; run_sudo ufw allow 443/tcp; echo "${GREEN}Web ouvert.${NC}"; pause; fi ;;
+            2) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "${GREEN}SSH ouvert.${NC}"; pause; fi ;;
+            3) read -p "Port (ex: 8080) : " p; [ -n "$p" ] && { if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi; } ;;
+            4) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
+            5) firewall_checkbox_delete ;;
+            6) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
+            0) return ;;
+        esac
+    done
+}
+
+# --- 4. GESTION SITES NGINX ---
+
+create_nginx_vhost_manual() {
+    echo -e "\n${BLUE}--- CRÉATION VHOST ---${NC}"
+    read -p "Nom fichier (ex: site.conf) : " vn; [ -z "$vn" ] && return
+    tf="$SITES_AVAIL/$vn"
+    if [ -e "$tf" ]; then echo "Existe déjà."; return; fi
+    run_sudo touch "$tf"; run_sudo nano "$tf"
+    read -p "Activer et ouvrir port ? (o/n) " va
+    if [[ "$va" == "o" ]]; then
+        run_sudo ln -sf "$tf" "$SITES_ENAB/$vn"
+        scan_ports_and_update_ufw "$tf" "allow"
+        echo "${GREEN}Activé.${NC}"
+        if run_sudo nginx -t; then run_sudo systemctl reload nginx; else echo "${RED}Erreur Nginx${NC}"; fi
+    fi
+}
+
+deploy_from_github() {
+    clear; echo -e "${BLUE}--- DÉPLOIEMENT GITHUB ---${NC}"
+    ensure_installed "git" "git" || return
+    read -p "URL du dépôt (https://...) : " repo_url; [ -z "$repo_url" ] && return
+    echo -e "\nDestination : ${CYAN}$DIR_WEB/<dossier>${NC}"
+    read -p "Nom du dossier : " folder_name; [ -z "$folder_name" ] && return
+    TARGET="$DIR_WEB/$folder_name"
+    if [ -d "$TARGET" ]; then
+        echo -e "${RED}❌ Dossier existant.${NC}"
+        read -p "Supprimer et recloner ? (o/n) " d
+        [[ "$d" == "o" ]] && run_sudo rm -rf "$TARGET" || return
+    fi
+    echo -e "${CYAN}Clonage...${NC}"
+    if run_sudo git clone "$repo_url" "$TARGET"; then echo -e "${GREEN}✅ Cloné.${NC}"; else echo -e "${RED}❌ Erreur Clone.${NC}"; pause; return; fi
+    
+    if [ -f "$TARGET/composer.json" ]; then
+        echo -e "\n${YELLOW}🐘 composer.json détecté.${NC}"
+        read -p "Installer dépendances PHP ? (o/n) " dc
+        if [[ "$dc" == "o" ]]; then ensure_installed "composer" "composer" && run_sudo bash -c "cd $TARGET && export COMPOSER_ALLOW_SUPERUSER=1; composer install --no-interaction --optimize-autoloader"; fi
+    fi
+    echo -e "\n${CYAN}Permissions www-data...${NC}"
+    run_sudo chown -R www-data:www-data "$TARGET"; run_sudo chmod -R 755 "$TARGET"
+    read -p "Créer le Vhost Nginx maintenant ? (o/n) " cv; [[ "$cv" == "o" ]] && create_nginx_vhost_manual
+    pause
+}
+
+manage_nginx_sites() {
+    [ ! -d "$SITES_AVAIL" ] && return
+    while true; do
+        clear; echo -e "${BLUE}--- GESTION DES SITES WEB ---${NC}"
+        echo -e "  ${GREEN}0.${NC} ➕ Créer un nouveau Vhost"
+        echo "--------------------------------------------------------------------------------------"
+        printf "%-4s %-25s %-12s %-30s %-10s\n" "ID" "DOMAINE" "PORTS" "RACINE (ROOT)" "ÉTAT"
+        echo "--------------------------------------------------------------------------------------"
+        shopt -s nullglob; files=("$SITES_AVAIL"/*); shopt -u nullglob
+        i=1
+        if [ ${#files[@]} -eq 0 ]; then echo "   (Aucun site)"; else
+            for f in "${files[@]}"; do
+                bn=$(basename "$f"); [ -L "$SITES_ENAB/$bn" ] && st="${GREEN}[ACTIF]${NC}" || st="${RED}[STOP]${NC}"
+                if ! content=$(cat "$f" 2>/dev/null); then content=$(run_sudo cat "$f" 2>/dev/null); fi
+                p_list=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | sort -u | paste -sd "," -); [ -z "$p_list" ] && p_list="-"
+                r_path=$(echo "$content" | grep -m 1 "^\s*root" | awk '{print $2}' | tr -d ';'); [ -z "$r_path" ] && r_path="-"
+                disp_domain="${bn:0:24}"; disp_root="${r_path: -29}"
+                printf "  ${CYAN}%-2d.${NC} %-25s %-12s %-30s %b\n" "$i" "$disp_domain" "$p_list" "$disp_root" "$st"
+                ((i++))
+            done
+        fi
+        echo "--------------------------------------------------------------------------------------"
+        echo -e "  ${RED}r.${NC} Retour"
+        read -r -p "Choix > " sel
+        [[ "$sel" == "r" ]] && break
+        [[ "$sel" == "0" ]] && { create_nginx_vhost_manual; pause; continue; }
+        if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#files[@]}" ]; then
+            f="${files[$((sel-1))]}"; n=$(basename "$f")
+            while true; do
+                clear; echo -e "${BLUE}SITE : $n${NC}"
+                echo "1. 📝 Modifier Config | 2. ⚡ Activer | 3. 🛑 Désactiver | 4. 🗑️  Supprimer"
+                read -r -p "> " a
+                case "$a" in
+                    1) run_sudo nano "$f"; echo "${YELLOW}Reload requis!${NC}"; pause ;;
+                    2) run_sudo ln -sf "$f" "$SITES_ENAB/$n"; scan_ports_and_update_ufw "$f" "allow"; break ;;
+                    3) [ -L "$SITES_ENAB/$n" ] && run_sudo rm "$SITES_ENAB/$n"; scan_ports_and_update_ufw "$f" "delete"; break ;;
+                    4)  read -p "Confirmer suppression ? (o/n) " c
+                        if [[ "$c" == "o" ]]; then
+                            [ -L "$SITES_ENAB/$n" ] && run_sudo rm "$SITES_ENAB/$n"
+                            run_sudo mkdir -p "$BACKUP_DIR"
+                            run_sudo tar -czf "$BACKUP_DIR/deleted_vhost_${n}_$(date +%Y%m%d_%H%M%S).tar.gz" -C "$SITES_AVAIL" "$n"
+                            run_sudo rm "$f"; scan_ports_and_update_ufw "$f" "delete"; echo "Supprimé."; pause; break 2
+                        fi ;;
+                    *) break ;;
+                esac
+            done
+        fi
+    done
+}
+
+# --- 5. BACKUP & RESTAURATION ---
+
+multi_select_backup() {
+    local T="$1"; local L="$2"; [ ! -d "$T" ] && return
+    run_sudo mkdir -p "$BACKUP_DIR"
+    shopt -s nullglob; local I=("$T"/*); shopt -u nullglob
+    [ ${#I[@]} -eq 0 ] && return
+    declare -A S; for i in "${!I[@]}"; do S[$i]=0; done
+    while true; do
+        clear; echo -e "${BLUE}BACKUP : $L${NC}"; C=0
+        for i in "${!I[@]}"; do
+            [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"
+            printf "  %s %2d. %s\n" "$M" $((i+1)) "$(basename "${I[$i]}")"; ((C++))
+        done
+        echo "  G. Go | T. Tout | N. Rien | r. Retour"
+        read -r -p "> " c
+        [[ "$c" == "r" ]] && break
+        [[ "$c" =~ [Tt] ]] && { for i in "${!I[@]}"; do S[$i]=1; done; continue; }
+        [[ "$c" =~ [Nn] ]] && { for i in "${!I[@]}"; do S[$i]=0; done; continue; }
+        if [[ "$c" =~ [Gg] ]]; then
+            F=""; H=0; for i in "${!I[@]}"; do [ "${S[$i]}" -eq 1 ] && { F="$F $(basename "${I[$i]}")"; H=1; }; done
+            [ $H -eq 0 ] && continue
+            D=$(date +%Y%m%d_%H%M%S); A="backup_${L}_$D.tar.gz"
+            echo "Zip..."; run_sudo bash -c "cd $T && tar -czf $BACKUP_DIR/$A $F"; echo "OK: $A"; pause; break
+        fi
+        [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le $C ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
+    done
+}
+
+backup_menu() {
+    while true; do
+        clear; echo -e "${BLUE}=== 💾 SAUVEGARDES ===${NC}"
+        echo -e "  ${GREEN}1.${NC} 🌍 Sauvegarde Complète (Nginx + Web)"
+        echo -e "  ${GREEN}2.${NC} ⚙️  Config Nginx seule"
+        echo -e "  ${GREEN}3.${NC} 📂 Données Web (Sélection)"
+        echo -e "  ${GREEN}4.${NC} 🌐 Fichiers Vhosts (Sélection)"
+        echo -e "  ${GREEN}5.${NC} 📜 Voir sauvegardes"
+        echo -e "  ${GREEN}6.${NC} ♻️  Restaurer Vhost supprimé"
+        echo -e "  ${RED}r.${NC} Retour"
+        read -r -p "> " c; D=$(date +%Y%m%d_%H%M%S)
+        case "$c" in
+            1) run_sudo mkdir -p "$BACKUP_DIR" && run_sudo tar -czf "$BACKUP_DIR/FULL_SERVER_$D.tar.gz" "$DIR_NGINX" "$DIR_WEB" && echo "OK" && pause ;;
+            2) run_sudo mkdir -p "$BACKUP_DIR" && run_sudo tar -czf "$BACKUP_DIR/NGINX_CONF_$D.tar.gz" "$DIR_NGINX" && echo "OK" && pause ;;
+            3) multi_select_backup "$DIR_WEB" "WebData" ;;
+            4) multi_select_backup "$SITES_AVAIL" "Vhosts" ;;
+            5) ls -lh "$BACKUP_DIR" 2>/dev/null; pause ;;
+            6) 
+               shopt -s nullglob; files=("$BACKUP_DIR"/deleted_vhost_*.tar.gz); shopt -u nullglob
+               if [ ${#files[@]} -eq 0 ]; then echo "Aucun backup trouvé."; pause; continue; fi
+               for i in "${!files[@]}"; do echo "$((i+1)). $(basename "${files[$i]}")"; done
+               read -p "Num > " n; if [[ "$n" =~ ^[0-9]+$ ]]; then
+                   sel="${files[$((n-1))]}"; run_sudo tar -xzf "$sel" -C "$SITES_AVAIL" && echo "Restauré dans $SITES_AVAIL" && pause
+               fi ;;
+            r) break ;;
+        esac
+    done
+}
+
+# --- 6. OUTILS DIVERS ---
+
+spawn_restricted_shell() {
+    local T="$1"; local N="$2"; [ ! -d "$T" ] && run_sudo mkdir -p "$T"
+    cd "$T" || return
+    echo -e "\n${GREEN}🔒 JAIL $N${NC} (ls, cd, cat, nano, cp, mv, rm, mkdir, pwd, nginx -t)"
+    trap 'echo ""' SIGINT
+    while true; do
+        R="${PWD#$T}"; [ -z "$R" ] && R="/"; read -e -p "${YELLOW}$N${NC}:[${BLUE}$R${NC}]$ " c a
+        [ -z "$c" ] && continue
+        if [[ "$a" == /* || "$a" == *" /"* || ("$c" != "cd" && "$a" == *".."*) ]]; then echo "${RED}Interdit${NC}"; continue; fi
+        case "$c" in
+            cd) [ -z "$a" ] && cd "$T" || { cd "$a" 2>/dev/null; [[ "$PWD" != "$T"* ]] && cd "$T"; } ;;
+            ls|ll|la) ls --color=auto -h $a ;;
+            cat) [ -f "$a" ] && cat "$a" ;;
+            nano) if [ -w "$a" ] || [ ! -e "$a" ] && [ -w . ]; then nano -R "$a"; else run_sudo nano -R "$a"; fi ;;
+            mkdir) run_sudo mkdir -p "$a" ;;
+            cp) run_sudo cp -r $a ;;
+            mv) run_sudo mv $a ;;
+            rm) run_sudo rm -rf $a ;;
+            pwd) echo "$PWD" ;;
+            nginx) if [[ "$a" == "-t" ]]; then run_sudo nginx -t; else echo "${RED}Non${NC}"; fi ;;
+            clear) clear ;;
+            exit|quit) break ;;
+            *) echo "${RED}?${NC}" ;;
+        esac
+    done
+    trap '' SIGINT SIGQUIT SIGTSTP
+}
+
+logs_menu() {
+    while true; do
+        clear; echo "1. Access | 2. Error | 3. Both | 4. Journal | r. Back"
+        read -r -p "> " c; trap - SIGINT
+        case "$c" in
+            1) run_sudo tail -f "$LOG_ACCESS" ;;
+            2) run_sudo tail -f "$LOG_ERROR" ;;
+            3) run_sudo tail -f "$LOG_ACCESS" "$LOG_ERROR" ;;
+            4) run_sudo journalctl -u nginx -f -n 50 ;;
+            r) trap '' SIGINT; break ;;
+        esac
+        trap '' SIGINT
+    done
+}
+
+open_user_shell() {
+    if ! ask_sudo_gui; then return; fi
+    echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir."
+    trap - SIGINT SIGQUIT SIGTSTP
+    export SKIP_KIOSK_MENU=1
+    bash --login
+    unset SKIP_KIOSK_MENU
+    trap '' SIGINT SIGQUIT SIGTSTP
+}
+
+# --- 7. MAIN LOOP ---
+
+HEADER_LINE="#############################################" # 45 caractères
+
+while true; do
+    clear
+    get_sys_info # On récupère les IPs
+
+    if systemctl is-active --quiet nginx; then SX="${GREEN}● ON${NC}"; else SX="${RED}● OFF${NC}"; fi
+    # On check UFW sans mot de passe
+    if run_sudo ufw status 2>/dev/null | grep -q "Status: active"; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
+
+    # Mise en page du Dashboard
+    echo -e "${BLUE}$HEADER_LINE${NC}"
+    echo -e "${BLUE}#         MANAGER SERVEUR WEB             #${NC}" # Ajusté pour correspondre à 45 caractères
+    echo -e "${BLUE}$HEADER_LINE${NC}"
+    
+    # Ligne 1 : Statuts des services
+    printf "  🔌 Nginx : %-15b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
+    
+    # Ligne 2 : IP locale
+    echo -e "  💻 IP locale : ${YELLOW}$LOCAL_IP${NC}"
+    
+    # Ligne 3 : IP publique
+    echo -e "  🌍 IP publique : ${YELLOW}$PUBLIC_IP${NC}"
+    
+    echo "---------------------------------------------"
+    echo -e "  ${GREEN}1.${NC} 🌐 Sites Web (VHosts)"
+    echo -e "  ${GREEN}2.${NC} 🧱 Pare-feu (UFW)"
+    echo -e "  ${GREEN}3.${NC} 🔄 Redémarrer Nginx"
+    echo -e "  ${GREEN}4.${NC} 📜 Logs Nginx"
+    echo ""
+    echo -e "  ${GREEN}5.${NC} 📂 Explorateur Fichiers (Jails)"
+    echo -e "  ${GREEN}6.${NC} 💾 Sauvegardes"
+    echo -e "  ${GREEN}7.${NC} 🐙 Déployer via GitHub"
+    echo ""
+    echo -e "  ${GREEN}8.${NC} 🚀 Mises à jour Système (OS)"
+    echo -e "  ${RED}9.${NC} 🔌 Éteindre le serveur"
+    echo -e "  ${RED}10.${NC}♻️  Redémarrer le serveur (Reboot)"
+    echo "---------------------------------------------"
+    echo -e "  [${YELLOW}admin${NC}] 💻 Console Shell"
+    echo -e "  [${RED}exit${NC}]  🚪 Quitter"
+    echo "---------------------------------------------"
+    read -r -p "Votre choix > " ch
+
+    case "$ch" in
+        1) manage_nginx_sites ;;
+        2) manage_ufw_clean ;;
+        3) if run_sudo nginx -t; then run_sudo systemctl restart nginx; echo "OK"; else echo "Erreur Config"; fi; pause ;;
+        4) logs_menu ;;
+        5) 
+           echo "1. WEB | 2. NGINX | 3. PHP"; read -p "> " j
+           [ "$j" == "1" ] && spawn_restricted_shell "$DIR_WEB" "WEB"
+           [ "$j" == "2" ] && spawn_restricted_shell "$DIR_NGINX" "NGINX"
+           [ "$j" == "3" ] && spawn_restricted_shell "$DIR_PHP" "PHP"
+           ;;
+        6) backup_menu ;;
+        7) deploy_from_github ;;
+        8) menu_system_update ;;
+        9) server_power_action "ÉTEINDRE" "poweroff" ;;
+        10) server_power_action "REDÉMARRER" "reboot" ;;
+        admin) open_user_shell ;;
+        exit|q) kill -9 $PPID 2>/dev/null; exit 0 ;;
+    esac
+done

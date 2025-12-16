@@ -1,0 +1,247 @@
+#!/bin/bash
+
+# =================================
+#  MANAGER ANSIBLE 
+# =================================
+
+# ------ A AJOUTER DANS LOCAL.D -----
+# Lancement automatique du Menu Ansible
+# if [[ $- == *i* ]] && [ -z "$SKIP_ANSIBLE_MENU" ]; then
+#     if command -v ansible-menu &> /dev/null; then
+#         ansible-menu
+#     fi
+# fi
+# ------ FIN -----
+
+# --- CONFIGURATION ---
+# Ces variables sont remplacées par l'installateur ou par défaut
+export ANSIBLE_ROOT="${ANSIBLE_ROOT:-$HOME/ansible}"
+export SCRIPTS_DIR="$ANSIBLE_ROOT/scripts"
+
+# Sécurité Kiosk
+trap '' SIGINT SIGQUIT SIGTSTP
+
+# Couleurs
+BLUE=$'\033[0;34m'
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+GREY=$'\033[1;30m'
+NC=$'\033[0m'
+BOLD=$'\033[1m'
+
+# --- 1. FONCTIONS SYSTÈME (Sudo & Power) ---
+
+ask_sudo_gui() {
+    if sudo -n true 2>/dev/null; then return 0; fi
+    echo -e "\n${YELLOW}🔒 Authentification requise (Mot de passe Sudo)${NC}"
+    read -s -p "Mot de passe : " user_pass; echo ""
+    echo "$user_pass" | sudo -S -v 2>/dev/null
+    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
+}
+
+run_sudo() {
+    # Tente sans mot de passe d'abord
+    if sudo -n true 2>/dev/null; then
+        sudo "$@"
+        return $?
+    fi
+    # Sinon demande via GUI texte
+    if ! ask_sudo_gui; then return 1; fi
+    sudo "$@"
+}
+
+pause() { echo ""; read -p "Appuyez sur Entrée pour continuer..."; }
+
+server_power_action() {
+    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $1 DU SYSTÈME${NC}"
+    read -p "Tapez 'confirmer' pour exécuter : " i
+    if [ "$i" == "confirmer" ]; then 
+        run_sudo $2
+        exit 0
+    else echo "Annulé."; pause; fi
+}
+
+# --- 2. CENTRE DE MISE À JOUR ---
+
+menu_system_update() {
+    while true; do
+        clear
+        echo -e "${BLUE}#############################################${NC}"
+        echo -e "${BLUE}#           CENTRE DE MISE À JOUR           #${NC}"
+        echo -e "${BLUE}#############################################${NC}"
+        echo ""
+        echo -e "${BOLD}SYSTÈME D'EXPLOITATION (OS) :${NC}"
+        echo -e "  ${CYAN}1.${NC} 🔄 Mise à jour paquets (apt update/upgrade)"
+        echo -e "  ${CYAN}2.${NC} 🧹 Nettoyage (autoremove & clean)"
+        echo -e "  ${CYAN}3.${NC} 🆙 Mise à niveau complète (apt dist-upgrade)"
+        echo -e "  ${CYAN}4.${NC} 📝 Éditer les dépôts (sources.list)"
+        echo "---------------------------------------------"
+        echo -e "  ${RED}0.${NC} 🔙 Retour"
+        echo "---------------------------------------------"
+        read -r -p "Choix > " uc
+
+        case "$uc" in
+            1) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- APT UPDATE ---${NC}"
+                   sudo apt-get update
+                   echo -e "\n${CYAN}--- APT UPGRADE ---${NC}"
+                   sudo apt-get upgrade -y
+                   echo -e "\n${GREEN}Fini.${NC}"; pause
+               fi 
+               ;;
+            2) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- NETTOYAGE ---${NC}"
+                   sudo apt-get autoremove -y; sudo apt-get clean
+                   echo -e "\n${GREEN}Système nettoyé.${NC}"; pause
+               fi 
+               ;;
+            3) 
+               if ask_sudo_gui; then 
+                   echo -e "\n${CYAN}--- DIST-UPGRADE ---${NC}"
+                   sudo apt-get dist-upgrade -y
+                   echo -e "\n${GREEN}Fini.${NC}"; pause
+               fi 
+               ;;
+            4) 
+               if ask_sudo_gui; then run_sudo nano /etc/apt/sources.list; fi 
+               ;;
+            0) return ;;
+        esac
+    done
+}
+
+# --- 3. FONCTIONS ANSIBLE ---
+
+run_tool() {
+    local script_path="$1"
+    local require_sudo="$2"
+
+    export ANSIBLE_ROOT
+    
+    if [ -f "$script_path" ]; then
+        if [ ! -x "$script_path" ]; then chmod +x "$script_path"; fi
+        
+        # Gestion SUDO pour les scripts Cron/Système
+        if [ "$require_sudo" == "true" ]; then
+            if ask_sudo_gui; then
+                sudo -E "$script_path"
+            fi
+        else
+            # Pour les scripts normaux, on débloque temporairement les signaux
+            trap - SIGINT SIGQUIT SIGTSTP
+            "$script_path"
+            trap '' SIGINT SIGQUIT SIGTSTP
+        fi
+    else
+        echo -e "${RED}Erreur : Script introuvable ($script_path)${NC}"
+        pause
+    fi
+}
+
+spawn_restricted_shell() {
+    echo -e "\n${GREEN}>>> Ouverture du shell dans $ANSIBLE_ROOT${NC}"
+    echo -e "${GREY}Tapez 'exit' pour revenir au menu.${NC}"
+    echo "------------------------------------------------"
+    
+    cd "$ANSIBLE_ROOT" || echo "Erreur dossier"
+
+    trap - SIGINT SIGQUIT SIGTSTP
+
+    # Configuration dynamique (Jail)
+    RC_CONFIG="
+        SKIP_ANSIBLE_MENU=1
+        [ -f ~/.bashrc ] && . ~/.bashrc
+        export ANSIBLE_ROOT=\"$ANSIBLE_ROOT\"
+        
+        check_path() {
+            if [[ \"\$PWD\" != \"$ANSIBLE_ROOT\" && \"\$PWD\" != \"$ANSIBLE_ROOT\"/* ]]; then
+                echo -e \"\n\033[0;31m⛔ Sortie de périmètre interdite.\033[0m\"
+                cd \"$ANSIBLE_ROOT\"
+            fi
+        }
+        
+        export PROMPT_COMMAND=check_path
+        export PS1='(Ansible) \[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ '
+    "
+
+    bash --rcfile <(echo "$RC_CONFIG")
+
+    trap '' SIGINT SIGQUIT SIGTSTP
+}
+
+open_user_shell() {
+    echo -e "\n${YELLOW}🔓 Veuillez saisir votre mot de passe pour quitter le menu définitivement :${NC}"
+    if su -c "true" "$USER"; then
+        echo -e "${GREEN}Accès autorisé.${NC}"
+        trap - SIGINT SIGQUIT SIGTSTP
+        export SKIP_ANSIBLE_MENU=1
+        export ANSIBLE_ROOT
+        cd "$ANSIBLE_ROOT" || echo "Erreur dossier"
+        exec bash
+    else
+        echo -e "${RED}❌ Mot de passe incorrect.${NC}"
+        sleep 2
+    fi
+}
+
+# --- 4. MENU PRINCIPAL ---
+
+while true; do
+    clear
+    echo -e "${BLUE}#############################################${NC}"
+    echo -e "${BLUE}#      ANSIBLE CONTROLLER - DASHBOARD       #${NC}"
+    echo -e "${BLUE}#############################################${NC}"
+    echo -e "${BLUE}#  Racine : $ANSIBLE_ROOT ${NC}"
+    echo "---------------------------------------------"
+    echo -e "  ${GREEN}1.${NC} 🚀 Lancer un Playbook          (Launcher)"
+    echo -e "  ${GREEN}2.${NC} ⏰ Gérer les Tâches Cron       (Planificateur) ${YELLOW}[SUDO]${NC}"
+    echo -e "  ${GREEN}3.${NC} 🔐 Gestion des Secrets         (Vault)"
+    echo -e "  ${GREEN}4.${NC} 🌍 Explorateur d'Inventaire    (Inventory)"
+    echo -e "  ${GREEN}5.${NC} 👥 Gestion Active Directory    (AD Manager)"
+    echo -e "  ${GREEN}6.${NC} 🛠️  Shell Ansible Rapide        (Nano/Git...)"
+    echo -e "  ${GREEN}7.${NC} ➕ Créer un nouveau Rôle       (Générateur)"
+    echo ""
+    echo -e "  ${GREEN}8.${NC} 🚀 Mises à jour Système (OS)"
+    echo -e "  ${RED}9.${NC} 🔌 Éteindre le serveur"
+    echo -e "  ${RED}10.${NC}♻️  Redémarrer le serveur"
+    echo "---------------------------------------------"
+    echo -e "  [${YELLOW}admin${NC}] 🔓 Déverrouillage Admin     (Shell Définitif)"
+    echo -e "  [${RED}exit${NC}]  🚪 Déconnexion"
+    echo "---------------------------------------------"
+    read -r -p "Votre choix > " choice
+
+    case "$choice" in
+        1) run_tool "$SCRIPTS_DIR/launcher.sh" "false" ;;
+        2) 
+           if [ -f "$SCRIPTS_DIR/manage_ansible_cron.sh" ]; then
+               run_tool "$SCRIPTS_DIR/manage_ansible_cron.sh" "true"
+           else
+               run_tool "$SCRIPTS_DIR/manage_cron.sh" "true"
+           fi 
+           ;;
+        3) run_tool "$SCRIPTS_DIR/vault_manager.sh" "false" ;;
+        4) run_tool "$SCRIPTS_DIR/inventory_tool.sh" "false" ;;
+        5) run_tool "$SCRIPTS_DIR/ad_manager.sh" "false" ;;
+        6) spawn_restricted_shell ;;
+        7) 
+           echo -e "\n${GREEN}>>> Création de rôle${NC}"
+           cd "$ANSIBLE_ROOT" || echo "Erreur dossier"
+           if [ -f "$SCRIPTS_DIR/create_role.sh" ]; then
+               "$SCRIPTS_DIR/create_role.sh"
+           else
+               echo -e "${RED}Script introuvable ($SCRIPTS_DIR/create_role.sh)${NC}"
+           fi
+           pause
+           ;;
+        8) menu_system_update ;;
+        9) server_power_action "ÉTEINDRE" "poweroff" ;;
+        10) server_power_action "REDÉMARRER" "reboot" ;;
+        admin|shell) open_user_shell ;;
+        exit|quit|q) echo "Déconnexion..."; kill -9 $PPID ;;
+        *) echo "Choix invalide."; sleep 0.5 ;;
+    esac
+done
