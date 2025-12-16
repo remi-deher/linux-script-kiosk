@@ -23,15 +23,15 @@ DESC_FILE="$PLAYBOOKS_DIR/.descriptions"
 VAULT_PASS_FILE="$ANSIBLE_ROOT/.vault_pass"
 CMD_UFW="/usr/sbin/ufw"
 
-# Couleurs
-BLUE='\033[0;34m'
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-YELLOW='\033[1;33m'
-CYAN='\033[0;36m'
-GREY='\033[1;30m'
-NC='\033[0m'
-BOLD='\033[1m'
+# Couleurs (Correction: ajout de $ pour interprétation ANSI)
+BLUE=$'\033[0;34m'
+GREEN=$'\033[0;32m'
+RED=$'\033[0;31m'
+YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'
+GREY=$'\033[1;30m'
+NC=$'\033[0m'
+BOLD=$'\033[1m'
 
 # =======================================================
 # FONCTIONS UTILITAIRES
@@ -48,7 +48,8 @@ ask_sudo_gui() {
     read -s -p "Mot de passe : " user_pass
     echo ""
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0; else
+    if [ $? -eq 0 ]; then return 0;
+    else
         echo -e "${RED}❌ Mot de passe incorrect.${NC}"
         pause
         return 1
@@ -67,7 +68,7 @@ get_sys_info() {
     PUBLIC_IP=$(curl -s -4 -m 1 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
 
-    # 2. OS (On coupe plus large pour éviter le tronquage "trix")
+    # 2. OS
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
 
@@ -89,7 +90,6 @@ get_sys_info() {
         SX="${RED}● OFF${NC}"
     fi
 
-    # UFW : On regarde juste si systemd le voit actif pour éviter de demander sudo trop tôt
     if systemctl is-active --quiet ufw; then
         FW="${GREEN}● ACTIF${NC}"
     else
@@ -357,62 +357,6 @@ module_inventory() {
 }
 
 # =======================================================
-# MODULE : ACTIVE DIRECTORY (AD Manager)
-# =======================================================
-module_ad_manager() {
-    local PLAYBOOK="playbooks/manage_ad.yml"
-    local TARGET_LIMIT="tag_AD"
-
-    if [ ! -f "$ANSIBLE_ROOT/$PLAYBOOK" ]; then
-        echo -e "${RED}Playbook AD introuvable ($PLAYBOOK).${NC}"; pause; return
-    fi
-
-    while true; do
-        clear
-        echo -e "${BLUE}=== GESTION ACTIVE DIRECTORY ===${NC}"
-        echo "Cible : $TARGET_LIMIT"
-        echo "------------------------"
-        echo "1. Créer utilisateur"
-        echo "2. Désactiver utilisateur"
-        echo "3. Reset Password"
-        echo "4. Lister utilisateurs"
-        echo "5. Détails utilisateur"
-        echo "r. Retour"
-        read -p "> " c
-        local uname passw
-        case $c in
-            1)
-                read -p "User : " uname
-                read -s -p "Pass : " passw; echo ""
-                ansible-playbook "$PLAYBOOK" --limit "$TARGET_LIMIT" -e "ad_action=create_user target_username=$uname target_password=$passw"
-                pause
-                ;;
-            2)
-                read -p "User à désactiver : " uname
-                ansible-playbook "$PLAYBOOK" --limit "$TARGET_LIMIT" -e "ad_action=disable_user target_username=$uname"
-                pause
-                ;;
-            3)
-                read -p "User : " uname
-                read -s -p "Nouveau Pass : " passw; echo ""
-                ansible-playbook "$PLAYBOOK" --limit "$TARGET_LIMIT" -e "ad_action=reset_password target_username=$uname target_password=$passw"
-                pause
-                ;;
-            4)
-                ansible-playbook "$PLAYBOOK" --limit "$TARGET_LIMIT" -e "ad_action=list_users"
-                pause
-                ;;
-            5)
-                read -p "User : " uname
-                ansible-playbook "$PLAYBOOK" --limit "$TARGET_LIMIT" -e "ad_action=get_user_details target_username=$uname"
-                pause
-                ;;
-            r) return ;;
-        esac
-    done
-}
-
-# =======================================================
 # MODULE : GÉNÉRATEUR DE RÔLE
 # =======================================================
 module_create_role() {
@@ -533,49 +477,78 @@ module_power() {
     fi
 }
 
+open_user_shell() {
+    if ! ask_sudo_gui; then return; fi
+    echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir."
+    # On désactive le piège (trap) pour autoriser Ctrl+C / Ctrl+Z dans le shell admin
+    trap - SIGINT SIGQUIT SIGTSTP
+    export SKIP_KIOSK=1
+    
+    cd "$ANSIBLE_ROOT" || cd "$HOME"
+    bash --login
+    
+    unset SKIP_KIOSK
+    # On réactive le piège pour empêcher la fermeture du script après le retour
+    trap '' SIGINT SIGQUIT SIGTSTP
+}
+
 # =======================================================
 # MENU PRINCIPAL (BOUCLE INFINIE)
 # =======================================================
 SEP="${BLUE}------------------------------------------------${NC}"
 SEP_RED="${RED}------------------------------------------------${NC}"
 
-while true; do
+while true;
+do
     clear
-    # Collecte des infos système (ne PAS utiliser 'local' ici)
+    # Collecte des infos système
     get_sys_info
     
-    # --- HEADER DASHBOARD (Avec alignement des couleurs corrigé) ---
-    echo -e "${BLUE}################################################${NC}"
-    echo -e "${BLUE}#       ANSIBLE MANAGER - MONOLITHIQUE         #${NC}"
-    echo -e "${BLUE}################################################${NC}"
+    # --- EN-TÊTE AVEC CADRE BLEU ---
+    echo -e "${BLUE}#################################${NC}"
+    echo -e "${BLUE}#       ANSIBLE MANAGER         #${NC}"
+    echo -e "${BLUE}#################################${NC}"
     
-    # Alignement : On met la couleur DANS le format string %s pour que le padding soit visuel
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
     printf "  🏠 LAN: ${YELLOW}%-23s${NC} | 🌍 WAN: ${YELLOW}%s${NC}\n" "$LOCAL_IP" "$PUBLIC_IP"
     
     echo -e "$SEP"
-    # Ligne des Services (Cron & UFW)
-    printf "  ⏰ Cron : %-22b | 🛡️  UFW : %b\n" "$SX" "$FW"
-    printf "  ℹ️  Ansible: ${CYAN}%-19s${NC} | 📁 Racine: %s\n" "$APP_VER" "$(basename "$ANSIBLE_ROOT")"
+
+    # --- INFO SERVICE (Correction alignement avec couleurs) ---
+    # On utilise %-20s pour compenser les caractères ANSI invisibles (~11 chars)
+    # SX et APP_VER contiennent des couleurs, donc leur longueur "réelle" est > longueur visible
+    printf "  ⏰ Automate : %-20b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
+    printf "  ℹ️  Ansible  : %-20s | 📁 Racine    : %s\n" "${CYAN}$APP_VER${NC}" "$(basename "$ANSIBLE_HOME")"
+
     echo -e "$SEP"
-    
-    # --- MENU OPTIONS ---
+
+    # --- MENU : AUTOMATISATION ---
     echo -e " ${BOLD}${CYAN}🤖 AUTOMATISATION${NC}"
     echo -e "    ${GREEN}1.${NC} 🚀 Lancer un Playbook"
-    echo -e "    ${GREEN}2.${NC} ⏰ Planificateur (Cron)"
-    echo -e "    ${GREEN}3.${NC} 🔐 Secrets (Vault)"
-    echo -e "    ${GREEN}4.${NC} 👥 Active Directory"
+    echo -e "    ${GREEN}2.${NC} ⏰ Gérer les Tâches Cron"
+    echo -e "    ${GREEN}3.${NC} 🔐 Gestion des Secrets (Vault)"
     echo ""
-    echo -e " ${BOLD}${CYAN}🛠️  OUTILS${NC}"
-    echo -e "    ${GREEN}5.${NC} 🌍 Inventaire"
-    echo -e "    ${GREEN}6.${NC} 🔒 Shell Restreint (Jail)"
-    echo -e "    ${GREEN}7.${NC} ➕ Créer un Rôle"
-    echo -e "    ${GREEN}8.${NC} 🧱 Pare-feu (UFW)"
-    echo -e "    ${GREEN}9.${NC} 📦 Mises à jour OS"
+
+    # --- MENU : OUTILS ---
+    echo -e " ${BOLD}${CYAN}🛠️  OUTILS & PARAMÈTRES${NC}"
+    echo -e "    ${GREEN}4.${NC} 🌍 Explorateur d'Inventaire"
+    echo -e "    ${GREEN}5.${NC} 🔒 Explorateur Fichiers (Jail)"
+    echo -e "    ${GREEN}6.${NC} ➕ Créer un nouveau Rôle"
+    echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
+    echo -e "    ${GREEN}8.${NC} 🚀 Mises à jour (App & OS)"
 
     echo -e "$SEP_RED"
-    echo -e "  [${RED}reboot${NC}] Redémarrer  |  [${RED}exit${NC}] Quitter"
+
+    # --- MENU : SYSTÈME (Danger) ---
+    echo -e " ${BOLD}${RED}💀 ZONES SYSTÈME${NC}"
+    echo -e "    ${RED}9.${NC} 🔌 Éteindre le serveur"
+    echo -e "    ${RED}10.${NC}♻️  Redémarrer le serveur"
+
+    echo -e "$SEP"
+
+    # --- PIED DE PAGE ---
+    echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin    |    [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
 
     read -r -p "  Votre choix > " choice
@@ -584,14 +557,14 @@ while true; do
         1) module_launcher ;;
         2) module_cron ;;
         3) module_vault ;;
-        4) module_ad_manager ;;
-        5) module_inventory ;;
-        6) module_jail ;;
-        7) module_create_role ;;
-        8) module_firewall ;;
-        9) module_updates ;;
-        reboot) module_power "REDEMARRER" ;;
-        shutdown) module_power "ETEINDRE" ;;
+        4) module_inventory ;;
+        5) module_jail ;;
+        6) module_create_role ;;
+        7) module_firewall ;;
+        8) module_updates ;;
+        9) module_power "ETEINDRE" ;;
+        10) module_power "REDEMARRER" ;;
+        admin) open_user_shell ;;
         exit|quit|q)
             echo "Au revoir."
             kill -9 $PPID 2>/dev/null
