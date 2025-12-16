@@ -292,9 +292,12 @@ module_backup_git() {
 
     _config_git() {
         ensure_git || return
-        echo -e "\n${CYAN}--- CONFIGURATION GIT ---${NC}"
-        if [ ! -d ".git" ]; then git init; else echo "Dépôt déjà initialisé."; fi
+        echo -e "\n${CYAN}--- CONFIGURATION GIT & BRANCHES ---${NC}"
+        
+        # 1. INIT
+        if [ ! -d ".git" ]; then git init; else echo "Dépôt local déjà initialisé."; fi
 
+        # 2. USER
         cuser=$(git config user.name)
         if [ -z "$cuser" ]; then
             read -p "Votre Nom : " gname
@@ -303,18 +306,52 @@ module_backup_git() {
             git config user.email "$gemail"
         fi
 
+        # 3. REMOTE URL
         cremote=$(git remote get-url origin 2>/dev/null)
         if [ -z "$cremote" ]; then
             read -p "URL dépôt (https/ssh) : " gurl
             [ -n "$gurl" ] && git remote add origin "$gurl"
         else
-            echo -e "Remote : ${GREY}$cremote${NC}"
+            echo -e "Remote actuel : ${GREY}$cremote${NC}"
             read -p "Changer URL ? (o/n) " chg
             if [ "$chg" == "o" ]; then
                 read -p "Nouvelle URL : " nurl
                 git remote set-url origin "$nurl"
             fi
         fi
+
+        # 4. CONFIGURATION DES BRANCHES (Local & Distant)
+        echo -e "\n${YELLOW}--- Configuration des Branches ---${NC}"
+        current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "master")
+        
+        echo "Le standard actuel est 'main'. Votre branche actuelle est '$current_branch'."
+        read -p "Nom de la branche principale souhaitée (Défaut: main) : " target_branch
+        [ -z "$target_branch" ] && target_branch="main"
+
+        # Renommage Local (Force le nom)
+        if [ "$current_branch" != "$target_branch" ]; then
+            echo -e "${GREY}Renommage local de '$current_branch' vers '$target_branch'...${NC}"
+            git branch -M "$target_branch"
+        else
+            echo -e "${GREEN}Branche locale '$target_branch' OK.${NC}"
+        fi
+
+        # Tentative de liaison Remote (Upstream)
+        echo -e "${GREY}Vérification du dépôt distant...${NC}"
+        if git fetch origin 2>/dev/null; then
+            # Le remote répond, on regarde si la branche existe
+            if git ls-remote --exit-code --heads origin "$target_branch" >/dev/null 2>&1; then
+                git branch --set-upstream-to=origin/"$target_branch" "$target_branch"
+                echo -e "${GREEN}✅ Liaison établie : local/$target_branch <-> origin/$target_branch${NC}"
+            else
+                echo -e "${YELLOW}La branche '$target_branch' n'existe pas encore sur le serveur.${NC}"
+                echo "Elle sera créée automatiquement lors du prochain Push."
+            fi
+        else
+            echo -e "${RED}Impossible de joindre le dépôt distant.${NC}"
+            echo "Vérifiez l'URL ou votre connexion. La config sera appliquée au prochain Push."
+        fi
+        
         pause
     }
 
@@ -322,21 +359,19 @@ module_backup_git() {
         ensure_git || return
         if [ ! -d ".git" ]; then echo -e "${RED}Pas de dépôt git.${NC}"; pause; return; fi
 
-        # Vérification Config Utilisateur
+        # Config identité si manquante
         if [ -z "$(git config user.email)" ]; then
-            echo -e "${RED}Erreur : Identité Git non configurée.${NC}"
-            read -p "Email Git : " ge
-            read -p "Nom Git : " gn
-            git config user.email "$ge"
-            git config user.name "$gn"
+            echo -e "${RED}Identité Git manquante.${NC}"
+            _config_git
+            return
         fi
 
-        echo -e "\n${CYAN}--- SYNCHRONISATION GITHUB ---${NC}"
+        echo -e "\n${CYAN}--- SYNCHRONISATION GITHUB (PUSH) ---${NC}"
         
-        echo -e "${GREY}Vérification distante (fetch)...${NC}"
+        # Fetch silencieux
         git fetch origin > /dev/null 2>&1
 
-        # 1. Vérification des changements locaux
+        # 1. Check Local Changes
         git update-index -q --refresh
         STATUS_PORCELAIN=$(git status --porcelain)
         NEEDS_PUSH=0
@@ -361,7 +396,7 @@ module_backup_git() {
             echo -e "${GREEN}Aucun fichier en attente de commit.${NC}"
         fi
 
-        # 2. Vérification Ahead
+        # 2. Check Ahead
         CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
         UNPUSHED_COUNT=$(git rev-list origin/$CURRENT_BRANCH..HEAD --count 2>/dev/null)
         
@@ -370,38 +405,23 @@ module_backup_git() {
             NEEDS_PUSH=1
         fi
 
-        # 3. Action Push avec gestion "Premier Push"
+        # 3. Action Push (avec fallback intelligent si remote manquant)
         if [ "$NEEDS_PUSH" == "1" ]; then
             echo ""
             read -p "Envoyer vers GitHub (Push) ? (o/n) " cp
             if [ "$cp" == "o" ]; then
-                echo -e "${CYAN}Tentative de Push vers origin/$CURRENT_BRANCH...${NC}"
+                echo -e "${CYAN}Push vers origin/$CURRENT_BRANCH...${NC}"
                 
-                # On essaie le push standard d'abord
+                # Push standard
                 if git push origin "$CURRENT_BRANCH" 2>/dev/null; then
                     echo -e "${GREEN}✅ Push réussi.${NC}"
                 else
-                    # CAS : Premier push ou branche upstream manquante
-                    echo -e "${YELLOW}⚠️  Le push standard a échoué (Probablement pas de branche amont).${NC}"
-                    echo -e "Nous allons configurer la branche principale."
-                    
-                    read -p "Nom de la branche (par défaut: main) : " target_branch
-                    [ -z "$target_branch" ] && target_branch="main"
-
-                    echo -e "${GREY}1. Renommage de la branche locale en '$target_branch'...${NC}"
-                    git branch -M "$target_branch"
-
-                    # Vérification si remote existe, sinon on redemande (sécurité)
-                    if ! git remote get-url origin >/dev/null 2>&1; then
-                        read -p "URL du dépôt distant : " remote_url
-                        git remote add origin "$remote_url"
-                    fi
-
-                    echo -e "${GREY}2. Push et définition de l'upstream...${NC}"
-                    if git push -u origin "$target_branch"; then
+                    # Fallback : Premier push / Set Upstream
+                    echo -e "${YELLOW}Premier envoi détecté pour '$CURRENT_BRANCH'. Configuration upstream...${NC}"
+                    if git push -u origin "$CURRENT_BRANCH"; then
                         echo -e "${GREEN}✅ Push réussi et branche configurée !${NC}"
                     else
-                        echo -e "${RED}❌ Échec du push. Vérifiez vos accès.${NC}"
+                        echo -e "${RED}❌ Échec du push.${NC}"
                     fi
                 fi
             else
@@ -415,12 +435,118 @@ module_backup_git() {
         pause
     }
 
+    _pull_git() {
+        ensure_git || return
+        echo -e "\n${CYAN}--- PULL (MISE À JOUR) ---${NC}"
+        
+        current_branch=$(git rev-parse --abbrev-ref HEAD)
+        
+        # Essai standard
+        if git pull > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Dépôt mis à jour avec succès.${NC}"
+        else
+            echo -e "${YELLOW}⚠️  Le pull standard a échoué.${NC}"
+            echo -e "Tentative de réparation du lien avec origin/$current_branch..."
+            
+            # Essai forcé avec nom de branche explicite
+            if git pull origin "$current_branch"; then
+                echo -e "${GREEN}✅ Succès !${NC}"
+                git branch --set-upstream-to=origin/"$current_branch" "$current_branch" 2>/dev/null
+                echo -e "${GREY}Lien permanent rétabli.${NC}"
+            else
+                echo -e "${RED}❌ Échec critique (Conflit ou branche distante inexistante).${NC}"
+                echo "Essayez de lancer le menu '2. Configurer Dépôt GitHub' pour vérifier les branches."
+            fi
+        fi
+        pause
+    }
+
+    _rollback_git() {
+        ensure_git || return
+        while true; do
+            clear
+            echo -e "${RED}=== ANNULATION / ROLLBACK ===${NC}"
+            echo -e "${GREY}Attention : ces actions peuvent détruire des données.${NC}"
+            echo ""
+            echo "1. Annuler les modifications NON commitées (Discard Changes)"
+            echo "2. Annuler le dernier commit (Garder les fichiers) (Soft Reset)"
+            echo "3. ⚠️  Réinitialiser TOTALEMENT sur le dépôt distant (Hard Reset)"
+            echo "0. Retour"
+            read -p "> " c
+            case "$c" in
+                1)
+                    read -p "Voulez-vous supprimer toutes les modifications en cours ? (o/n) " conf
+                    if [ "$conf" == "o" ]; then
+                        git checkout .
+                        git clean -fd
+                        echo -e "${GREEN}Modifications annulées.${NC}"
+                        pause
+                    fi
+                    ;;
+                2)
+                    read -p "Annuler le dernier commit mais garder les fichiers modifiés ? (o/n) " conf
+                    if [ "$conf" == "o" ]; then
+                        git reset --soft HEAD~1
+                        echo -e "${GREEN}Dernier commit annulé. Fichiers préservés.${NC}"
+                        pause
+                    fi
+                    ;;
+                3)
+                    read -p "⚠️  DANGER: Cela va effacer TOUT ce qui n'est pas sur GitHub. Sûr ? (taper 'OUI') " conf
+                    if [ "$conf" == "OUI" ]; then
+                        git fetch origin
+                        current=$(git rev-parse --abbrev-ref HEAD)
+                        if ! git rev-parse "origin/$current" >/dev/null 2>&1; then
+                             echo "${YELLOW}Branche distante introuvable. Essai sur origin/main...${NC}"
+                             current="main"
+                        fi
+                        git reset --hard origin/$current
+                        echo -e "${GREEN}Dépôt réinitialisé sur origin/$current.${NC}"
+                        pause
+                    fi
+                    ;;
+                0) return ;;
+            esac
+        done
+    }
+
+    _lazygit_mode() {
+        if ! command -v lazygit &> /dev/null; then
+            echo -e "${YELLOW}Lazygit n'est pas installé.${NC}"
+            read -p "L'installer automatiquement ? (o/n) " inst
+            if [ "$inst" == "o" ]; then
+                if ask_sudo_gui; then
+                   echo "Installation de la dernière version..."
+                   LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+                   curl -Lo lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+                   tar xf lazygit.tar.gz lazygit
+                   sudo install lazygit /usr/local/bin
+                   rm lazygit.tar.gz lazygit
+                   echo -e "${GREEN}Lazygit installé !${NC}"
+                   sleep 1
+                else
+                   return
+                fi
+            else
+                return
+            fi
+        fi
+
+        echo -e "${GREEN}Ouverture de Lazygit...${NC}"
+        trap - SIGINT SIGQUIT SIGTSTP
+        lazygit
+        trap '' SIGINT SIGQUIT SIGTSTP
+    }
+
     while true; do
         clear
         echo -e "${BLUE}=== SAUVEGARDES & GIT ===${NC}"
         echo -e "  ${GREEN}1.${NC} 💾 Sauvegarde Locale (Tar.gz)"
-        echo -e "  ${GREEN}2.${NC} ⚙️  Configurer Dépôt GitHub"
+        echo -e "  ${GREEN}2.${NC} ⚙️  Configurer Dépôt GitHub (Init/Branches)"
         echo -e "  ${GREEN}3.${NC} 🚀 Synchroniser (Push)"
+        echo -e "  ${GREEN}4.${NC} ⬇️  Mettre à jour (Pull)"
+        echo -e "  ${YELLOW}5.${NC} 🔙 Rollback / Annuler"
+        echo -e "  ${CYAN}6.${NC} 🐢 Terminal Avancé (Lazygit)"
         echo -e "  ${RED}0.${NC} Retour"
         echo ""
         read -p "> " c
@@ -428,6 +554,9 @@ module_backup_git() {
             1) _backup_local ;;
             2) _config_git ;;
             3) _push_git ;;
+            4) _pull_git ;;
+            5) _rollback_git ;;
+            6) _lazygit_mode ;;
             0) return ;;
         esac
     done
@@ -576,9 +705,9 @@ while true; do
     get_sys_info
     
     # Header
-    echo -e "${BLUE}#################################${NC}"
-    echo -e "${BLUE}#       ANSIBLE MANAGER         #${NC}"
-    echo -e "${BLUE}#################################${NC}"
+    echo -e "${BLUE}###################################${NC}"
+    echo -e "${BLUE}#       ANSIBLE MANAGER           #${NC}"
+    echo -e "${BLUE}###################################${NC}"
     
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
@@ -592,7 +721,7 @@ while true; do
     echo -e " ${BOLD}${CYAN}🚀 DÉVELOPPEMENT & OPÉRATIONS${NC}"
     echo -e "    ${GREEN}1.${NC} 🧙 Assistant Création (Rôles/Tasks/Config)"
     echo -e "    ${GREEN}2.${NC} ▶️  Lancer un Playbook"
-    echo -e "    ${GREEN}3.${NC} 💾 Sauvegardes & Git (Backup/Push)"
+    echo -e "    ${GREEN}3.${NC} 💾 Sauvegardes & Git (Backup/Push/Rollback)"
     echo -e "    ${GREEN}4.${NC} 🔐 Gestion des Secrets (Vault)"
     echo ""
 
