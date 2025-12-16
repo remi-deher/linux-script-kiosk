@@ -1,672 +1,339 @@
 #!/bin/bash
-
-# ==============================================================================
-# A AJOUTER DANS LOCAL.D POUR LE DEMARRER EN MODE KIOSK
-# ==============================================================================
-
-# Auto-start Zoraxy Manager Kiosk
-# Ne se lance que si :
-# 1. Le shell est interactif
-# 2. La variable SKIP n'est pas définie
-# 3. La commande existe
-# 4. L'utilisateur n'est pas root (optionnel, pour sécurité)
-#
-#if [[ $- == *i* ]] && [ -z "$SKIP_ZORAXY_MENU" ] && [ "$EUID" -ne 0 ]; then
-#    if command -v zoraxy-manager &> /dev/null; then
-#        zoraxy-manager
-#    fi
-#fi
-# ==============================================================================
-# Configurer Sudo (Optionnel pour UFW)
-# ==============================================================================
-
-#sudo visudo -f /etc/sudoers.d/zoraxy-ufw
-# Ajouter : %gmon_groupe ALL=(ALL) NOPASSWD: /usr/sbin/ufw status*
-
 # =======================================================
-# ZORAXY MANAGER
+#  MANAGER ZORAXY - VERSION FINALE (FIX ETAT & MENU)
 # =======================================================
 
 # --- CONFIGURATION ---
-ZORAXY_HOME="/etc/zoraxy"
 SERVICE_NAME="zoraxy"
-BACKUP_DIR="/var/backups/zoraxy"
-VERSION_FILE="$ZORAXY_HOME/current_version"
-GITHUB_REPO="tobychui/zoraxy"
+ZORAXY_HOME="/etc/zoraxy"
 COOKIE_FILE="/tmp/zoraxy_cookie.txt"
+VERSION_FILE="$ZORAXY_HOME/current_version"
+BACKUP_DIR="/var/backups/zoraxy"
 VERSION_CACHE="/tmp/zoraxy_latest_ver"
-PUBLIC_IP_CACHE="/tmp/zoraxy_public_ip" 
-
-# Dossiers de configuration
-CONF_PROXY="$ZORAXY_HOME/conf/proxy"
+PUBLIC_IP_CACHE="/tmp/zoraxy_public_ip"
+CMD_UFW="/usr/sbin/ufw"
 CONF_CERT="$ZORAXY_HOME/conf/certs"
 
-# --- SÉCURITÉ KIOSK ---
+# --- NETTOYAGE PRÉVENTIF ---
+rm -f "$COOKIE_FILE"
+
+# --- DETECTION PORT ---
+get_running_port() {
+    PORT_SERVICE=$(systemctl cat "$SERVICE_NAME" 2>/dev/null | grep -oE "\-port=:[0-9]+" | head -n1 | cut -d: -f2)
+    if [ -n "$PORT_SERVICE" ]; then echo "$PORT_SERVICE"; return; fi
+    PID=$(pgrep -x "zoraxy" | head -n1)
+    if [ -n "$PID" ]; then
+        PORT=$(sudo netstat -tulpn 2>/dev/null | grep "$PID/zoraxy" | head -n1 | awk '{print $4}' | awk -F: '{print $NF}')
+        if [ -n "$PORT" ]; then echo "$PORT"; return; fi
+    fi
+    echo "8000"
+}
+
+CURRENT_PORT=$(get_running_port)
+API_URL="http://127.0.0.1:$CURRENT_PORT"
+
+# --- SÉCURITÉ ---
 trap '' SIGINT SIGQUIT SIGTSTP
-
-# --- COULEURS ---
-BLUE=$'\033[0;34m'
-GREEN=$'\033[0;32m'
-RED=$'\033[0;31m'
-YELLOW=$'\033[1;33m'
-CYAN=$'\033[0;36m'
-GREY=$'\033[1;30m'
-NC=$'\033[0m'
-BOLD=$'\033[1m'
-
-# --- 1. FONCTIONS SYSTÈME DE BASE ---
+BLUE=$'\033[0;34m'; GREEN=$'\033[0;32m'; RED=$'\033[0;31m'; YELLOW=$'\033[1;33m'; CYAN=$'\033[0;36m'; GREY=$'\033[1;30m'; NC=$'\033[0m'; BOLD=$'\033[1m'
 
 ask_sudo_gui() {
     if sudo -n true 2>/dev/null; then return 0; fi
-    echo -e "\n${YELLOW}🔒 Authentification requise (Mot de passe Sudo)${NC}"
-    read -s -p "Mot de passe : " user_pass; echo ""
+    echo -e "\n${YELLOW}🔒 Authentification système requise${NC}"
+    read -s -p "Mot de passe Sudo : " user_pass; echo ""
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
+    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Incorrect.${NC}"; pause; return 1; fi
 }
+run_sudo() { if sudo -n true 2>/dev/null; then sudo "$@"; return $?; fi; if ! ask_sudo_gui; then return 1; fi; sudo "$@"; }
+run_sudo_silent() { if sudo -n "$@" 2>/dev/null; then return 0; fi; return 1; }
+pause() { echo ""; read -p "Entrée pour continuer..."; }
+check_requirements() { if ! command -v jq &> /dev/null; then echo "Erreur: 'jq' manquant. sudo apt install jq"; exit 1; fi; }
 
-run_sudo() {
-    if [[ "$*" == *"ufw status"* ]] && sudo -n /usr/sbin/ufw status >/dev/null 2>&1; then sudo "$@"; return $?; fi
-    if ! ask_sudo_gui; then return 1; fi
-    sudo "$@"
-}
-
-pause() { echo ""; read -p "Appuyez sur Entrée pour continuer..."; }
-
-check_requirements() {
-    for cmd in jq curl grep sed awk tar wget openssl nano; do
-        if ! command -v $cmd &> /dev/null; then echo -e "${RED}❌ Erreur : '$cmd' requis.${NC}"; exit 1; fi
-    done
-}
-
-detect_api_url() {
-    SERVICE_FILE=$(systemctl show -p FragmentPath "$SERVICE_NAME" 2>/dev/null | cut -d= -f2)
-    if [ -f "$SERVICE_FILE" ]; then
-        PORT_ARG=$(grep "ExecStart=" "$SERVICE_FILE" | grep -o "\-port=:[0-9]*" | cut -d: -f2)
-        CURRENT_PORT="${PORT_ARG:-8000}"
-    else CURRENT_PORT="8000"; fi
-    API_URL="http://127.0.0.1:$CURRENT_PORT"
-}
+server_power_action() { local a="$1"; local c="$2"; local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g'); echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"; read -p "Tapez '$cw' pour confirmer : " i; if [ "$i" == "$cw" ]; then run_sudo $c; exit 0; else echo "Annulé."; pause; fi; }
 
 get_sys_info() {
-    detect_api_url
     LOCAL_IP=$(hostname -I | awk '{print $1}')
-    RAM_USG=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-    CPU_LOAD=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4 "%"}')
-    [ -z "$CPU_LOAD" ] && CPU_LOAD="N/A"
-    PUBLIC_IP=$(get_remote_ip_managed) 
+    if [ -f "$PUBLIC_IP_CACHE" ] && [ $(( $(date +%s) - $(stat -c %Y "$PUBLIC_IP_CACHE") )) -lt 3600 ]; then PUBLIC_IP=$(cat "$PUBLIC_IP_CACHE"); else PUBLIC_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null); [[ "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && echo "$PUBLIC_IP" > "$PUBLIC_IP_CACHE" || PUBLIC_IP="N/A"; fi
+    OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20); [ -z "$OS_NAME" ] && OS_NAME="Linux"
+    CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null); [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
+    RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
+    SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
+    if [ -f "$VERSION_FILE" ]; then APP_VER=$(cat "$VERSION_FILE"); else APP_VER="Unknown"; fi
 }
 
-get_local_version() { 
-    if [ -f "$VERSION_FILE" ]; then cat "$VERSION_FILE"; else echo "Inconnue"; fi; 
+# --- AUTHENTIFICATION API ---
+
+check_api_token_bool() {
+    if [ ! -f "$COOKIE_FILE" ]; then return 1; fi
+    CHECK=$(curl -s -m 2 -k -b "$COOKIE_FILE" "$API_URL/api/auth/username")
+    if [[ "$CHECK" == *\"* ]] && [[ "$CHECK" != *"error"* ]] && [[ "$CHECK" != *"<html"* ]]; then return 0; fi
+    return 1
 }
 
-get_remote_version_managed() {
-    if [ -f "$VERSION_CACHE" ]; then
-        LAST_MOD=$(stat -c %Y "$VERSION_CACHE")
-        NOW=$(date +%s); DIFF=$((NOW - LAST_MOD))
-        if [ $DIFF -lt 3600 ]; then cat "$VERSION_CACHE"; return; fi
-    fi
-    local UA="Mozilla/5.0 (compatible; ZoraxyManager/1.0)"
-    local TARGET_URL=$(curl -s -L -I -A "$UA" -m 3 -o /dev/null -w '%{url_effective}' "https://github.com/$GITHUB_REPO/releases/latest")
-    local VER=$(basename "$TARGET_URL")
-    if [ "$VER" == "latest" ] || [ -z "$VER" ] || [[ "$VER" != v* ]]; then
-        VER=$(curl -s -A "$UA" -m 3 "https://api.github.com/repos/$GITHUB_REPO/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-    fi
-    if [[ "$VER" == v* ]]; then echo "$VER" > "$VERSION_CACHE"; echo "$VER"; else [ -f "$VERSION_CACHE" ] && cat "$VERSION_CACHE"; fi
-}
-
-get_remote_ip_managed() { 
-    # 1. Vérification du cache (1 heure de validité)
-    if [ -f "$PUBLIC_IP_CACHE" ]; then
-        LAST_MOD=$(stat -c %Y "$PUBLIC_IP_CACHE")
-        NOW=$(date +%s); DIFF=$((NOW - LAST_MOD))
-        if [ $DIFF -lt 3600 ]; then cat "$PUBLIC_IP_CACHE"; return; fi
-    fi
-
-    # 2. Tentative de récupération (timeout 3s)
-    local PUB_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
-    
-    # 3. Mise en cache si réussi, sinon retourne la valeur en cache si elle existe
-    if [[ "$PUB_IP" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then 
-        echo "$PUB_IP" | tee "$PUBLIC_IP_CACHE"
-    else 
-        [ -f "$PUBLIC_IP_CACHE" ] && cat "$PUBLIC_IP_CACHE" || echo "N/A"
-    fi
-}
-
-# --- 2. FONCTIONS API ZORAXY ---
-
-api_login() {
-    local force_new=$1; [ "$force_new" == "true" ] && rm -f "$COOKIE_FILE"
-    HOMEPAGE=$(curl -s -L -k -c "$COOKIE_FILE" -b "$COOKIE_FILE" "$API_URL/")
+ensure_api_auth() {
+    if check_api_token_bool; then return 0; fi
+    echo -e "\n${CYAN}🔐 Authentification API Zoraxy requise${NC}"
+    HOMEPAGE=$(curl -s -L -k -c "$COOKIE_FILE" -b "$COOKIE_FILE" "$API_URL/" --max-time 2)
+    if [ $? -ne 0 ]; then echo -e "${RED}Erreur: Zoraxy injoignable ($API_URL)${NC}"; return 1; fi
     CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
-    if [ -z "$CSRF_TOKEN" ]; then echo -e "${RED}❌ Erreur: Zoraxy injoignable ($API_URL)${NC}"; return 1; fi
-    if [ -f "$COOKIE_FILE" ] && [ "$force_new" != "true" ]; then
-        CHECK=$(curl -s -k -b "$COOKIE_FILE" "$API_URL/api/auth/username"); if [[ "$CHECK" == \"*\" ]]; then return 0; fi
-    fi
-    echo -e "\n${CYAN}🔐 Authentification Zoraxy requise...${NC}"
-    read -p "Utilisateur : " z_user; [ -z "$z_user" ] && echo "Annulé." && return 1
-    read -s -p "Mot de passe : " z_pass; echo ""; [ -z "$z_pass" ] && echo "Annulé." && return 1
-    HTTP_CODE=$(curl -s -k -L -o /dev/null -w "%{http_code}" -X POST -c "$COOKIE_FILE" -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" -d "username=$z_user" -d "password=$z_pass" "$API_URL/api/auth/login")
-    if [ "$HTTP_CODE" == "200" ]; then echo -e "${GREEN}✅ Connecté.${NC}"; return 0; else echo -e "${RED}❌ Échec ($HTTP_CODE).$NC"; return 1; fi
-}
+    [ -z "$CSRF_TOKEN" ] && { echo "Erreur Token CSRF"; return 1; }
 
-get_json_list() {
-    if api_login "true"; then curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "type=host" "$API_URL/api/proxy/list"; else echo "ERROR"; return 1; fi
-}
-
-# --- 3. FONCTIONS SHELL AVANCÉES ---
-
-spawn_restricted_shell() {
-    local T="$1"; local N="$2"; [ ! -d "$T" ] && run_sudo mkdir -p "$T"
-    cd "$T" || return
-    echo -e "\n${GREEN}🔒 JAIL $N${NC}"
-    echo -e "Commandes : ${CYAN}ls, cd, cat, nano (read-only), cp, mv, rm, mkdir, pwd, chown, chmod${NC}"
-    echo -e "Tapez 'exit' pour sortir."
-    
-    # On autorise Ctrl+C pour interrompre une commande en cours (ex: cat d'un gros fichier)
-    trap 'echo ""' SIGINT
-    
     while true; do
-        R="${PWD#$T}"; [ -z "$R" ] && R="/"
-        # Gestion propre de l'entrée vide
-        if ! read -e -p "${YELLOW}$N${NC}:[${BLUE}$R${NC}]$ " c a; then break; fi
-        
-        [ -z "$c" ] && continue
-        
-        # Sécurité anti-évasion
-        if [[ "$a" == /* || "$a" == *" /"* || ("$c" != "cd" && "$a" == *".."*) ]]; then 
-            echo "${RED}⛔ Chemin interdit (restez dans $N)${NC}"; continue
-        fi
-        
-        case "$c" in
-            cd) [ -z "$a" ] && cd "$T" || { cd "$a" 2>/dev/null; [[ "$PWD" != "$T"* ]] && cd "$T"; } ;;
-            ls|ll|la) ls --color=auto -h $a ;;
-            cat) [ -f "$a" ] && cat "$a" ;;
-            # Nano intelligent : Lecture seule si pas proprio, sudo sinon
-            nano) if [ -w "$a" ] || [ ! -e "$a" ] && [ -w . ]; then nano -R "$a"; else run_sudo nano -R "$a"; fi ;;
-            mkdir) run_sudo mkdir -p "$a" ;;
-            cp) run_sudo cp -r $a ;;
-            mv) run_sudo mv $a ;;
-            rm) run_sudo rm -rf $a ;;
-            chown) run_sudo chown $a ;;
-            chmod) run_sudo chmod $a ;;
-            pwd) echo "$PWD" ;;
-            clear) clear ;;
-            exit|quit) break ;;
-            *) echo "${RED}Commande inconnue ou interdite${NC}" ;;
-        esac
+        read -p "Utilisateur : " u
+        read -s -p "Mot de passe : " p; echo ""
+        curl -s -k -X POST -c "$COOKIE_FILE" -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" -d "username=$u" -d "password=$p" "$API_URL/api/auth/login" > /dev/null
+        if check_api_token_bool; then echo -e "${GREEN}Connexion réussie.${NC}"; return 0; else echo -e "${RED}Identifiants incorrects.${NC}"; read -p "Réessayer ? (o/n) " r; if [[ "$r" != "o" ]]; then return 1; fi; fi
     done
-    # Rétablissement sécurité Kiosk
-    trap '' SIGINT SIGQUIT SIGTSTP
 }
 
-open_user_shell() {
-    # On utilise ask_sudo_gui pour demander le mot de passe proprement
-    # Cela sert d'authentification forte avant de donner le shell
-    if ! ask_sudo_gui; then return; fi
+get_api_status_indicator() { if check_api_token_bool; then echo -e "${GREEN}● Connecté${NC}"; else echo -e "${RED}● Déconnecté${NC}"; fi; }
 
-    echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir au menu."
-    
-    # 1. Libérer les signaux pour que le shell soit utilisable normalement
-    trap - SIGINT SIGQUIT SIGTSTP
-    
-    # 2. IMPORTANT : Variable pour éviter la boucle infinie dans .bashrc / profile.d
-    export SKIP_ZORAXY_MENU="true"
-    
-    # 3. Lancer le shell de login
-    bash --login
-    
-    # 4. Nettoyage après la sortie
-    unset SKIP_ZORAXY_MENU
-    trap '' SIGINT SIGQUIT SIGTSTP
+api_req() {
+    endpoint="$1"; shift
+    HOMEPAGE=$(curl -s -k -b "$COOKIE_FILE" "$API_URL/")
+    CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+    curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" "$@" "$API_URL$endpoint"
 }
 
-# --- 4. GESTION VHOST & SSL ---
+# --- GESTION PROXY ---
 
-show_vhost_table_local() {
-    echo -e "${BOLD}📋 SITES WEB (Lecture Locale)${NC}"
-    printf "%-30s | %-25s | %-12s | %s\n" "DOMAINE" "CIBLE" "SSL" "EXPIRATION"
-    echo "---------------------------------------------------------------------------------"
-    if ! sudo -n ls "$CONF_PROXY" >/dev/null 2>&1; then
-        if [ ! -d "$CONF_PROXY" ]; then echo -e "${YELLOW}Config introuvable.${NC}"; return; fi
-    fi
-    shopt -s nullglob; FOUND=0
-    for file in "$CONF_PROXY"/*.config; do
-        if [ -e "$file" ]; then
-            JSON_CONTENT=$(sudo cat "$file")
-            DOMAIN=$(echo "$JSON_CONTENT" | jq -r '.RootOrMatchingDomain // empty'); [ -z "$DOMAIN" ] && continue
-            TARGET=$(echo "$JSON_CONTENT" | jq -r '.ActiveOrigins[0].OriginIpOrDomain // "N/A"')
-            CERT_FILE="$CONF_CERT/$DOMAIN.pem"
-            if sudo test -f "$CERT_FILE"; then
-                SSL_STATUS="${GREEN}OUI${NC}"
-                END_DATE=$(sudo openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
-                if [ -n "$END_DATE" ]; then EXP_STR=$(date -d "$END_DATE" +'%Y-%m-%d' 2>/dev/null); [ -z "$EXP_STR" ] && EXP_STR="$END_DATE"; else EXP_STR="Inconnue"; fi
-            else SSL_STATUS="${RED}NON${NC}"; EXP_STR="-"; fi
-            printf "%-30s | %-25s | %-12b | %s\n" "${DOMAIN:0:30}" "${TARGET:0:25}" "$SSL_STATUS" "$EXP_STR"
-            ((FOUND++))
-        fi
-    done
-    shopt -u nullglob; if [ "$FOUND" -eq 0 ]; then echo -e "${GREY}   Aucun hôte configuré.${NC}"; fi
-    echo "---------------------------------------------------------------------------------"
-}
+declare -A MAP_DOMAINS; declare -A MAP_TARGETS
+COUNT_PROXIES=0
 
-select_domain_from_api() {
-    local list_json=$1; local action_name=$2
-    mapfile -t DOMAINS < <(echo "$list_json" | jq -r '.[] | .RootOrMatchingDomain')
-    if [ ${#DOMAINS[@]} -eq 0 ]; then echo -e "${YELLOW}Aucun domaine.${NC}"; return 1; fi
-    echo -e "\n${BOLD}Sélectionnez le domaine à $action_name :${NC}"
-    for i in "${!DOMAINS[@]}"; do printf "  ${CYAN}%2d.${NC} %s\n" "$((i+1))" "${DOMAINS[$i]}"; done
-    echo "   0. Annuler"
-    read -p "Numéro > " selection
-    if [[ "$selection" =~ ^[0-9]+$ ]] && [ "$selection" -ge 1 ] && [ "$selection" -le "${#DOMAINS[@]}" ]; then echo "${DOMAINS[$((selection-1))]}"; return 0; else return 1; fi
-}
+refresh_proxy_list_api() {
+    if ! check_api_token_bool; then ensure_api_auth || return 1; fi
+    echo -e "${CYAN}Chargement depuis l'API...${NC}"
+    JSON=$(api_req "/api/proxy/list" --data-urlencode "type=host")
 
-api_add_host() {
-    echo -e "\n${BOLD}➕ AJOUTER SITE${NC}"; if ! api_login; then pause; return; fi
-    read -p "Domaine : " d; read -p "Cible (IP:Port) : " t; [ -z "$d" ] && return
-    read -p "HTTPS Cible ? (o/n) : " x; [ "$x" == "o" ] && tls="true" || tls="false"
-    curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "type=host" --data-urlencode "rootname=$d" --data-urlencode "ep=$t" --data-urlencode "tls=$tls" "$API_URL/api/proxy/add" > /dev/null
-    echo -e "${GREEN}Ajouté.${NC}"; pause
-}
+    MAP_DOMAINS=(); MAP_TARGETS=(); COUNT_PROXIES=0
 
-api_del_host() {
-    echo -e "\n${BOLD}🗑️  SUPPRIMER SITE${NC}"; if ! api_login; then pause; return; fi
-    LIST=$(get_json_list); if [[ "$LIST" == "ERROR" ]]; then pause; return; fi
-    DOM=$(select_domain_from_api "$LIST" "supprimer")
-    if [ -n "$DOM" ]; then
-        read -p "Confirmer suppression de $DOM ? (o/n) " c
-        if [ "$c" == "o" ]; then
-            curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "type=host" --data-urlencode "ep=$DOM" "$API_URL/api/proxy/del" > /dev/null
-            echo -e "${GREEN}Supprimé.${NC}"
-        fi
-    fi
-    pause
-}
+    API_ST=$(get_api_status_indicator)
+    clear
+    echo -e "${BLUE}=== LISTE VHOSTS (API) ===${NC}  [🔌 API: $API_ST]"
+    printf "${GREY}%-3s %-30s %-25s %-8s %-8s${NC}\n" "ID" "DOMAINE" "CIBLE" "SSL" "ÉTAT"
+    echo "--------------------------------------------------------------------------------"
 
-api_edit_host() {
-    echo -e "\n${BOLD}✏️  MODIFIER CIBLE${NC}"; if ! api_login; then pause; return; fi
-    LIST=$(get_json_list); if [[ "$LIST" == "ERROR" ]]; then pause; return; fi
-    DOM=$(select_domain_from_api "$LIST" "modifier")
-    if [ -n "$DOM" ]; then
-        OLD=$(echo "$LIST" | jq -r --arg d "$DOM" '.[] | select(.RootOrMatchingDomain==$d) | .ActiveOrigins[0].OriginIpOrDomain')
-        echo -e "Actuel : ${YELLOW}$OLD${NC}"; read -p "Nouvelle Cible : " NEW
-        [ -n "$NEW" ] && curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "ep=$DOM" --data-urlencode "origin=$OLD" --data-urlencode "payload={\"OriginIpOrDomain\":\"$NEW\"}" --data-urlencode "active=true" "$API_URL/api/proxy/upstream/update" > /dev/null
-        echo -e "${GREEN}Modifié.${NC}"
-    fi
-    pause
-}
+    # FIX: Utilisation de .Disabled au lieu de .Enabled
+    mapfile -t SITES < <(echo "$JSON" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)|\(.value.ActiveOrigins[0].OriginIpOrDomain // "N/A")|\(.value.UseTLS // false)|\(.value.Disabled // false)"')
 
-generate_ssl_api() {
-    echo -e "\n${CYAN}🔐 Génération SSL${NC}"; if ! api_login; then pause; return; fi
-    read -p "Domaine : " d; read -p "Email : " e; [ -z "$d" ] && return
-    echo -e "${YELLOW}En cours...${NC}"
-    RES=$(curl -s -X POST -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "domains=$d" --data-urlencode "filename=$d" --data-urlencode "email=$e" --data-urlencode "ca=Let's Encrypt" --data-urlencode "skipTLS=false" --data-urlencode "dns=false" "$API_URL/api/acme/obtainCert")
-    if [[ "$RES" == "true" ]]; then echo -e "${GREEN}OK.${NC}"; else echo -e "${RED}Erreur.${NC}"; fi; pause
-}
+    if [ ${#SITES[@]} -eq 0 ]; then echo "   (Aucun proxy trouvé)"; else
+        for site in "${SITES[@]}"; do
+            COUNT_PROXIES=$((COUNT_PROXIES+1))
+            IFS='|' read -r domain target use_tls is_disabled <<< "$site"
 
-renew_ssl_checkbox() {
-    if ! api_login; then pause; return; fi
-    LIST=$(get_json_list); if [[ "$LIST" == "ERROR" ]]; then pause; return; fi
-    mapfile -t D < <(echo "$LIST" | jq -r '.[] | .RootOrMatchingDomain')
-    if [ ${#D[@]} -eq 0 ]; then echo "Vide."; pause; return; fi
-    declare -a SEL; for i in "${!D[@]}"; do SEL[$i]=false; done
-    while true; do
-        clear; echo -e "${BOLD}Renouvellement SSL (Sélection)${NC}"
-        for i in "${!D[@]}"; do
-            if [ "${SEL[$i]}" == "true" ]; then M="${GREEN}[X]${NC}"; else M="[ ]"; fi
-            printf " %b %2d. %s\n" "$M" "$((i+1))" "${D[$i]}"
+            if sudo -n test -f "$CONF_CERT/$domain.pem" 2>/dev/null || [ -f "$CONF_CERT/$domain.pem" ]; then ssl_txt="${GREEN}OUI${NC}"; else ssl_txt="${RED}NON${NC}"; fi
+
+            # FIX ETAT : Si Disabled=true alors OFF, sinon ON
+            if [[ "$is_disabled" == "true" ]]; then
+                st_txt="${RED}● OFF${NC}"
+            else
+                st_txt="${GREEN}● ON${NC}"
+            fi
+
+            printf "%-3s %-30s %-25s %-8b %b\n" "$COUNT_PROXIES" "${domain:0:29}" "${target:0:24}" "$ssl_txt" "$st_txt"
+
+            MAP_DOMAINS[$COUNT_PROXIES]="$domain"
+            MAP_TARGETS[$COUNT_PROXIES]="$target"
         done
-        echo -e "[a] Tout | [n] Rien | [v] VALIDER | [q] Retour"
-        read -r -p "> " k
-        if [[ "$k" =~ ^[0-9]+$ ]] && [ "$k" -ge 1 ] && [ "$k" -le "${#D[@]}" ]; then idx=$((k-1)); if [ "${SEL[$idx]}" == "true" ]; then SEL[$idx]=false; else SEL[$idx]=true; fi
-        elif [ "$k" == "a" ]; then for i in "${!D[@]}"; do SEL[$i]=true; done
-        elif [ "$k" == "n" ]; then for i in "${!D[@]}"; do SEL[$i]=false; done
-        elif [ "$k" == "v" ]; then
-            read -p "Email ACME : " MAIL; [ -z "$MAIL" ] && continue
-            echo -e "${CYAN}Lancement...${NC}"
-            for i in "${!D[@]}"; do
-                if [ "${SEL[$i]}" == "true" ]; then
-                    echo -ne " ${D[$i]}... "
-                    curl -s -X POST -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "domains=${D[$i]}" --data-urlencode "filename=${D[$i]}" --data-urlencode "email=$MAIL" --data-urlencode "ca=Let's Encrypt" --data-urlencode "skipTLS=false" --data-urlencode "dns=false" "$API_URL/api/acme/obtainCert" >/dev/null && echo "OK" || echo "Err"
-                fi
-            done
-            pause; return
-        elif [ "$k" == "q" ]; then return; fi
-    done
+    fi
+    echo "--------------------------------------------------------------------------------"
 }
 
-# --- 5. CENTRE DE MISE À JOUR ---
+# --- ACTIONS ---
 
-menu_update_center() {
+add_proxy_wizard() {
+    echo -e "\n${BLUE}=== 🧙 ASSISTANT AJOUT ===${NC}"
+    read -p "Domaine (ex: app.lan) : " d; [ -z "$d" ] && return
+    read -p "Cible (IP:Port) : " t; [ -z "$t" ] && return
+    read -p "HTTPS Cible ? (o/n) : " x; [ "$x" == "o" ] && tls="true" || tls="false"
+
+    api_req "/api/proxy/add" --data-urlencode "type=host" --data-urlencode "rootname=$d" --data-urlencode "ep=$t" --data-urlencode "tls=$tls" >/dev/null
+    echo -e "\n${GREEN}Ajouté.${NC}"; pause
+}
+
+edit_proxy_target() {
+    read -p "Numéro : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ -n "${MAP_DOMAINS[$sel]}" ]; then
+        dom="${MAP_DOMAINS[$sel]}"; old="${MAP_TARGETS[$sel]}"
+        echo -e "Cible actuelle : ${YELLOW}$old${NC}"
+        read -p "Nouvelle Cible : " new_ep; [ -z "$new_ep" ] && return
+        read -p "HTTPS sur nouvelle cible ? (o/n) : " x; [ "$x" == "o" ] && tls="true" || tls="false"
+
+        # On utilise add pour écraser/mettre à jour
+        api_req "/api/proxy/add" --data-urlencode "type=host" --data-urlencode "rootname=$dom" --data-urlencode "ep=$new_ep" --data-urlencode "tls=$tls" >/dev/null
+        echo -e "\n${GREEN}Mise à jour envoyée.${NC}"; pause
+    fi
+}
+
+delete_proxy_ui() {
+    read -p "Numéro : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ -n "${MAP_DOMAINS[$sel]}" ]; then
+        dom="${MAP_DOMAINS[$sel]}"
+        read -p "Supprimer $dom ? (o/n) " c
+        if [ "$c" == "o" ]; then
+            api_req "/api/proxy/del" --data-urlencode "type=host" --data-urlencode "ep=$dom" >/dev/null
+            echo "Supprimé."; pause
+        fi
+    fi
+}
+
+ssl_proxy_ui() {
+    read -p "Numéro : " sel
+    if [[ "$sel" =~ ^[0-9]+$ ]] && [ -n "${MAP_DOMAINS[$sel]}" ]; then
+        dom="${MAP_DOMAINS[$sel]}"; read -p "Email (Let's Encrypt) : " email
+        echo "Demande en cours..."
+        api_req "/api/acme/obtainCert" --data-urlencode "domains=$dom" --data-urlencode "filename=$dom" --data-urlencode "email=$email" --data-urlencode "ca=Let's Encrypt" --data-urlencode "skipTLS=false" --data-urlencode "dns=false" >/dev/null
+        echo "Fini."; pause
+    fi
+}
+
+manage_zoraxy_menu() {
+    ensure_api_auth || return
+    check_requirements
     while true; do
         clear
-        echo -e "${BLUE}#############################################${NC}"
-        echo -e "${BLUE}#           CENTRE DE MISE À JOUR           #${NC}"
-        echo -e "${BLUE}#############################################${NC}"
-        
-        LOCAL_VER=$(get_local_version)
-        echo -e "  📌 Zoraxy Actuel : ${YELLOW}$LOCAL_VER${NC}"
-        
-        # Appel de la fonction gérée qui retourne le string
-        REMOTE_VER=$(get_remote_version_managed)
-
-        if [ -z "$REMOTE_VER" ]; then
-            Z_STATUS="${RED}Hors Ligne${NC}"
-            Z_MSG="${GREY}Mise à jour impossible${NC}"
-        elif [ "$LOCAL_VER" == "$REMOTE_VER" ]; then
-            Z_STATUS="${GREEN}À jour${NC}"
-            Z_MSG="🔄 Forcer réinstallation Zoraxy"
-        else
-            Z_STATUS="${YELLOW}Nouveau : $REMOTE_VER${NC}"
-            Z_MSG="🚀 Mettre à jour Zoraxy ($REMOTE_VER)"
-        fi
-        
-        echo -e "  🌍 Zoraxy Dispo  : $Z_STATUS"
-
-        if [ -f "$ZORAXY_HOME/zoraxy.old" ]; then RB_OK="true"; else RB_OK="false"; fi
-
-        echo "---------------------------------------------"
-        echo -e "${BOLD}APPLICATION ZORAXY :${NC}"
-        echo -e "  ${GREEN}1.${NC} $Z_MSG"
-        if [ "$RB_OK" == "true" ]; then
-            echo -e "  ${YELLOW}2.${NC} 🔙 Rollback Zoraxy"
-        else
-            echo -e "  ${GREY}2. 🔙 Rollback (Indisponible)${NC}"
-        fi
-        echo "---------------------------------------------"
-        echo -e "${BOLD}SYSTÈME D'EXPLOITATION (OS) :${NC}"
-        echo -e "  ${CYAN}3.${NC} 🔄 Mise à jour paquets (apt update/upgrade)"
-        echo -e "  ${CYAN}4.${NC} 🆙 Mise à niveau complète (apt dist-upgrade)"
-        echo -e "  ${CYAN}5.${NC} 📝 Éditer les dépôts (sources.list)"
-        echo "---------------------------------------------"
-        echo -e "  ${RED}0.${NC} 🔙 Retour"
-        echo "---------------------------------------------"
-        read -r -p "Choix > " uc
-
-        case "$uc" in
-            1) if [ -z "$REMOTE_VER" ]; then pause; continue; fi
-               if ! ask_sudo_gui; then continue; fi
-               echo -e "\n${YELLOW}Téléchargement...${NC}"
-               if wget -q --show-progress -O /tmp/z_new "https://github.com/$GITHUB_REPO/releases/download/$REMOTE_VER/zoraxy_linux_amd64"; then
-                   run_sudo systemctl stop "$SERVICE_NAME"
-                   [ -f "$ZORAXY_HOME/zoraxy" ] && run_sudo mv "$ZORAXY_HOME/zoraxy" "$ZORAXY_HOME/zoraxy.old"
-                   run_sudo mv /tmp/z_new "$ZORAXY_HOME/zoraxy"
-                   run_sudo chmod +x "$ZORAXY_HOME/zoraxy"
-                   echo "$REMOTE_VER" | run_sudo tee "$VERSION_FILE" > /dev/null
-                   run_sudo systemctl start "$SERVICE_NAME"
-                   echo -e "${GREEN}Succès.${NC}"; pause
-               else echo -e "${RED}Erreur download.${NC}"; pause; fi ;;
-            2) if [ "$RB_OK" == "true" ]; then
-                   if ! ask_sudo_gui; then continue; fi
-                   run_sudo systemctl stop "$SERVICE_NAME"
-                   run_sudo mv "$ZORAXY_HOME/zoraxy" "$ZORAXY_HOME/zoraxy.failed"
-                   run_sudo mv "$ZORAXY_HOME/zoraxy.old" "$ZORAXY_HOME/zoraxy"
-                   run_sudo chmod +x "$ZORAXY_HOME/zoraxy"
-                   echo "Rollback" | run_sudo tee "$VERSION_FILE" > /dev/null
-                   run_sudo systemctl start "$SERVICE_NAME"
-                   echo -e "${GREEN}Restauré.${NC}"; pause
-               fi ;;
-            3) if ask_sudo_gui; then echo -e "\n${CYAN}APT UPDATE${NC}"; sudo apt-get update; echo -e "\n${CYAN}APT UPGRADE${NC}"; sudo apt-get upgrade -y; echo -e "\n${GREEN}Fini.${NC}"; pause; fi ;;
-            4) if ask_sudo_gui; then echo -e "\n${CYAN}APT DIST-UPGRADE${NC}"; sudo apt-get dist-upgrade -y; echo -e "\n${GREEN}Fini.${NC}"; pause; fi ;;
-            5) if ask_sudo_gui; then sudo nano /etc/apt/sources.list; fi ;;
-            0) return ;;
+        refresh_proxy_list_api
+        echo -e "${BOLD}--- ACTIONS ---${NC}"
+        echo -e "  ${GREEN}1.${NC} ➕ Ajouter | ${CYAN}2.${NC} Modifier Cible | ${CYAN}3.${NC} SSL | ${RED}4.${NC} Supprimer | ${RED}r.${NC} Retour"
+        read -r -p "> " ch
+        case "$ch" in
+            1) add_proxy_wizard ;;
+            2) edit_proxy_target ;;
+            3) ssl_proxy_ui ;;
+            4) delete_proxy_ui ;;
+            r) break ;;
+            *) echo "Invalide"; sleep 0.5 ;;
         esac
     done
 }
 
-# --- 6. WORKFLOW CHANGEMENT PORT ---
+# --- WORKFLOW PORT ---
 
 workflow_change_port() {
-    echo -e "\n${BOLD}🔌 CHANGEMENT DE PORT${NC}"
-    echo -e "Actuel : ${YELLOW}$CURRENT_PORT${NC}"
-    read -p "Nouveau (ex: 8080) : " P_INPUT
-    NEW_PORT="${P_INPUT#:}"
-    
-    if [ -z "$NEW_PORT" ] || [ "$NEW_PORT" == "$CURRENT_PORT" ]; then echo "Annulé."; return; fi
-    if ! [[ "$NEW_PORT" =~ ^[0-9]+$ ]]; then echo -e "${RED}Invalide.${NC}"; return; fi
+    clear; echo -e "${BLUE}=== ⚙️  CHANGEMENT DE PORT ===${NC}"
+    echo "Port Actuel : $CURRENT_PORT"
+    read -p "Nouveau Port : " new_port
+    if [[ ! "$new_port" =~ ^[0-9]+$ ]] || [ "$new_port" -eq "$CURRENT_PORT" ]; then echo "Invalide."; pause; return; fi
 
-    if ! api_login; then return; fi
-
-    echo -e "\n${YELLOW}Analyse VHosts...${NC}"
-    OLD_LOC="127.0.0.1:$CURRENT_PORT"; OLD_LAN="$LOCAL_IP:$CURRENT_PORT"
-    LIST=$(curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "type=host" "$API_URL/api/proxy/list")
-    DOMS=$(echo "$LIST" | jq -r --arg t1 "$OLD_LOC" --arg t2 "$OLD_LAN" '.[] | select(.ActiveOrigins[].OriginIpOrDomain == $t1 or .ActiveOrigins[].OriginIpOrDomain == $t2) | .RootOrMatchingDomain')
-    CNT=$(echo "$DOMS" | grep -v "^$" | wc -l)
-
-    echo -e "\n${BLUE}Résumé :${NC} $CNT site(s) à migrer vers $NEW_PORT"
-    if [ "$CNT" -gt 0 ]; then echo -e "Sites : $(echo $DOMS | tr '\n' ' ')"; fi
-    
-    read -p "Confirmer ? (oui/non) : " c; if [ "$c" != "oui" ]; then return; fi
-
+    echo -e "\n${BOLD}1. Authentification REQUISE${NC}"
+    rm -f "$COOKIE_FILE"
+    if ! ensure_api_auth; then return; fi
     if ! ask_sudo_gui; then return; fi
 
-    if [ "$CNT" -gt 0 ]; then
-        echo "Migration VHosts..."
-        NEW_T="127.0.0.1:$NEW_PORT"
-        echo "$DOMS" | while read -r d; do
-            [ -z "$d" ] && continue
-            curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "ep=$d" --data-urlencode "origin=$OLD_LOC" --data-urlencode "payload={\"OriginIpOrDomain\":\"$NEW_T\"}" --data-urlencode "active=true" "$API_URL/api/proxy/upstream/update" >/dev/null
-            curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" --data-urlencode "ep=$d" --data-urlencode "origin=$OLD_LAN" --data-urlencode "payload={\"OriginIpOrDomain\":\"$NEW_T\"}" --data-urlencode "active=true" "$API_URL/api/proxy/upstream/update" >/dev/null
-            echo " - $d OK"
-        done
-    fi
+    echo -e "\n${BOLD}2. Mise à jour VHosts...${NC}"
+    JSON=$(api_req "/api/proxy/list" --data-urlencode "type=host")
+    mapfile -t TARGETS < <(echo "$JSON" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)|\(.value.ActiveOrigins[0].OriginIpOrDomain)"')
+    local_ip=$(hostname -I | awk '{print $1}')
+    count=0
 
-    echo "Pare-feu..."
-    sudo ufw allow "$NEW_PORT/tcp" >/dev/null
-    echo "Service..."
-    S_FILE=$(systemctl show -p FragmentPath "$SERVICE_NAME" | cut -d= -f2)
-    sudo sed -i "s|\-port=:[0-9]*|-port=:$NEW_PORT|g" "$S_FILE"
-    sudo systemctl daemon-reload
-    sudo systemctl restart "$SERVICE_NAME"
-    echo "Nettoyage..."
-    if [ "$CURRENT_PORT" != "$NEW_PORT" ]; then sudo ufw delete allow "$CURRENT_PORT/tcp" >/dev/null; fi
-    CURRENT_PORT=$NEW_PORT; API_URL="http://127.0.0.1:$CURRENT_PORT"
-    echo -e "${GREEN}Succès.${NC}"; pause
-}
-
-# --- 7. AUTRES FONCTIONS ---
-
-firewall_checkbox_delete() {
-    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
-    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
-    while true; do
-        clear; echo -e "${RED}${BOLD}SUPPRESSION UFW${NC}"
-        for i in "${!RULES[@]}"; do
-            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-            DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
-            if [ "${SEL[$i]}" == "true" ]; then M="${RED}✖ DEL${NC}"; else M="${GREEN}✔ OK ${NC}"; fi
-            printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
-        done
-        echo -e "[a] Tout | [n] Rien | [v] VALIDER | [q] Retour"
-        read -r -p "> " k
-        if [[ "$k" =~ ^[0-9]+$ ]]; then
-            for i in "${!RULES[@]}"; do
-                rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-                if [ "$rn" == "$k" ]; then if [ "${SEL[$i]}" == "true" ]; then SEL[$i]=false; else SEL[$i]=true; fi; fi
-            done
-        elif [ "$k" == "v" ]; then
-            declare -a DELS
-            for i in "${!RULES[@]}"; do
-                if [ "${SEL[$i]}" == "true" ]; then
-                    rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-                    DELS+=("$rn")
-                fi
-            done
-            if [ ${#DELS[@]} -gt 0 ]; then
-                if ask_sudo_gui; then
-                    SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
-                    for n in $SORTED; do yes | sudo ufw delete "$n" >/dev/null; done
-                    echo -e "${GREEN}Terminé.${NC}"; pause; break
-                fi
-            fi
-        elif [ "$k" == "q" ]; then break
-        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
-        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
+    for item in "${TARGETS[@]}"; do
+        domain=${item%%|*}; target=${item#*|}
+        if [[ "$target" =~ (127\.0\.0\.1|localhost|$local_ip):$CURRENT_PORT ]]; then
+            new_target=$(echo "$target" | sed "s/:$CURRENT_PORT/:$new_port/")
+            echo -e "  -> Update $domain : $target => $new_target"
+            api_req "/api/proxy/add" --data-urlencode "type=host" --data-urlencode "rootname=$domain" --data-urlencode "ep=$new_target" --data-urlencode "tls=false" >/dev/null
+            ((count++))
         fi
     done
+    echo "  $count mis à jour."
+
+    echo -e "\n${BOLD}3. Système & Restart...${NC}"
+    SERVICE_PATH=$(systemctl show -p FragmentPath "$SERVICE_NAME" | cut -d= -f2)
+    run_sudo sed -i "s/-port=:$CURRENT_PORT/-port=:$new_port/g" "$SERVICE_PATH"
+    run_sudo ufw allow "$new_port/tcp" >/dev/null
+    run_sudo ufw delete allow "$CURRENT_PORT/tcp" >/dev/null
+    run_sudo systemctl daemon-reload; run_sudo systemctl restart "$SERVICE_NAME"
+    CURRENT_PORT=$new_port; API_URL="http://127.0.0.1:$CURRENT_PORT"
+    echo -e "${GREEN}Terminé.${NC}"; pause
 }
 
-server_power_action() {
-    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $1 DU SYSTÈME${NC}"
-    read -p "Tapez 'confirmer' : " i
-    if [ "$i" == "confirmer" ]; then 
-        run_sudo $2
-        exit 0
-    else echo "Annulé."; pause; fi
-}
+# --- MENUS SYSTEME ---
 
-# --- 8. MENUS ---
-
-menu_config() {
+menu_daemon_modern() {
     while true; do
-        clear; detect_api_url; S_FILE=$(systemctl show -p FragmentPath "$SERVICE_NAME" | cut -d= -f2)
-        if grep -q "\-noauth" "$S_FILE" 2>/dev/null; then AS="${RED}NON${NC}"; AA="🔒 Activer Auth"; else AS="${GREEN}OUI${NC}"; AA="🔓 Désactiver Auth"; fi
-        echo -e "${BLUE}=== CONFIGURATION ===${NC}"
-        echo -e "Port: ${YELLOW}$CURRENT_PORT${NC} | Auth: $AS"
-        echo "---------------------"
-        echo -e "1. Changer Port"
-        echo -e "2. $AA"
-        echo -e "3. Édition Manuelle"
-        echo -e "0. Retour"
+        clear
+        ST=$(systemctl is-active "$SERVICE_NAME")
+        if [ "$ST" == "active" ]; then C="${GREEN}ACTIF${NC}"; else C="${RED}INACTIF${NC}"; fi
+        API_ST=$(get_api_status_indicator)
+        echo -e "${BLUE}=== ⚙️  DAEMON ===${NC}"; echo -e "  État : $C | API : $API_ST | Port : $CURRENT_PORT"
+        echo "------------------------------------------------"
+        echo -e "  1. ⚡ Changer Port (Wizard) | 2. Restart | 3. Stop | 4. Start | r. Retour"
         read -r -p "> " c
         case "$c" in
             1) workflow_change_port ;;
-            2) if ask_sudo_gui; then if grep -q "\-noauth" "$S_FILE"; then sudo sed -i "s| -noauth||g" "$S_FILE"; else sudo sed -i "/ExecStart/ s/$/ -noauth/" "$S_FILE"; fi; sudo systemctl daemon-reload; sudo systemctl restart "$SERVICE_NAME"; pause; fi ;;
-            3) if ask_sudo_gui; then sudo nano "$S_FILE"; sudo systemctl daemon-reload; pause; fi ;;
-            0) return ;;
+            2) if ask_sudo_gui; then run_sudo systemctl restart "$SERVICE_NAME"; echo "OK"; pause; fi ;;
+            3) if ask_sudo_gui; then run_sudo systemctl stop "$SERVICE_NAME"; echo "OK"; pause; fi ;;
+            4) if ask_sudo_gui; then run_sudo systemctl start "$SERVICE_NAME"; echo "OK"; pause; fi ;;
+            r) return ;;
         esac
     done
 }
 
-menu_firewall() {
+firewall_manager() {
     while true; do
-        clear
-        if run_sudo ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
-        echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"
-        if [[ "$ST" == *ACTIF* ]]; then run_sudo ufw status numbered; fi
-        echo "----------------------"
-        echo -e "1. Ouvrir Web (80/443)"
-        echo -e "2. Ouvrir SSH (22)"
-        echo -e "3. Activer UFW"
-        echo -e "4. Supprimer (Checkbox)"
-        echo -e "5. Désactiver UFW"
-        echo -e "0. Retour"
-        read -r -p "> " u
-        case "$u" in
-            1) run_sudo ufw allow 80/tcp; run_sudo ufw allow 443/tcp; pause ;;
-            2) run_sudo ufw allow 22/tcp; pause ;;
-            3) run_sudo ufw enable; pause ;;
-            4) firewall_checkbox_delete ;;
-            5) run_sudo ufw disable; pause ;;
-            0) return ;;
-        esac
+        clear; if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
+        echo -e "${BLUE}=== PARE-FEU ($ST) ===${NC}"; mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\["); if [ ${#RULES[@]} -eq 0 ]; then echo " (Vide)"; else for l in "${RULES[@]}"; do echo "$l" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"; done; fi
+        echo "------------------------------------------------"
+        echo "1. Ouvrir Port | 2. Supprimer | 3. ON/OFF | r. Retour"; read -r -p "> " c
+        case "$c" in 1) read -p "Port: " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi ;; 2) echo "sudo ufw delete <num>"; pause ;; 3) if [[ "$ST" == *"ACTIF"* ]]; then run_sudo ufw disable; else run_sudo ufw enable; fi; pause ;; r) return ;; esac
     done
 }
 
 menu_backup() {
-    if [ ! -d "$BACKUP_DIR" ]; then run_sudo mkdir -p "$BACKUP_DIR"; fi
-    while true; do
-        clear; echo -e "${BLUE}=== SAUVEGARDES ===${NC}"; ls -lh "$BACKUP_DIR" | grep "tar.gz" | awk '{print "📄 " $9 " (" $5 ")"}'
-        echo "-------------------"
-        echo -e "1. Créer"
-        echo -e "2. Supprimer"
-        echo -e "0. Retour"
-        read -r -p "> " b
-        case "$b" in
-            1) if ask_sudo_gui; then T=$(date +%Y%m%d_%H%M); sudo bash -c "cd $ZORAXY_HOME && tar --exclude='zoraxy' --exclude='*.tar.gz' -czf '$BACKUP_DIR/bkp_$T.tar.gz' ."; echo "OK"; pause; fi ;;
-            2) 
-               mapfile -t L < <(ls "$BACKUP_DIR"/*.tar.gz 2>/dev/null | xargs -n 1 basename)
-               for i in "${!L[@]}"; do echo "$((i+1)). ${L[$i]}"; done
-               read -p "Numéro > " d
-               if [[ "$d" =~ ^[0-9]+$ ]]; then T="${L[$((d-1))]}"; if [ -n "$T" ] && ask_sudo_gui; then sudo rm "$BACKUP_DIR/$T"; echo "Supprimé"; pause; fi; fi ;;
-            0) return ;;
-        esac
-    done
+    if [ ! -d "$BACKUP_DIR" ]; then run_sudo mkdir -p "$BACKUP_DIR"; fi; while true; do clear; echo -e "${BLUE}=== BACKUP ===${NC}"; ls -lh "$BACKUP_DIR" | grep "tar.gz"; echo "1. Créer | 2. Supprimer | r. Retour"; read -r -p "> " c; case "$c" in 1) if ask_sudo_gui; then T=$(date +%Y%m%d_%H%M); sudo bash -c "cd $ZORAXY_HOME && tar --exclude='zoraxy' --exclude='*.tar.gz' -czf '$BACKUP_DIR/bkp_$T.tar.gz' ."; echo "OK"; pause; fi ;; 2) read -p "Fichier: " f; if [ -f "$BACKUP_DIR/$f" ] && ask_sudo_gui; then sudo rm "$BACKUP_DIR/$f"; echo "Del"; pause; fi ;; r) return ;; esac; done
 }
 
-menu_vhost_ssl() {
-    while true; do
-        clear; show_vhost_table_local
-        echo -e "1. Ajouter Site"
-        echo -e "2. Modifier Cible"
-        echo -e "3. Supprimer"
-        echo -e "4. Générer SSL"
-        echo -e "5. Renouveler SSL"
-        echo -e "0. Retour"
-        read -r -p "> " c
-        case "$c" in 
-            1) api_add_host ;; 2) api_edit_host ;; 3) api_del_host ;; 4) generate_ssl_api ;; 5) renew_ssl_checkbox ;; 0) return ;; 
-        esac
-    done
+menu_update_center() {
+    while true; do clear; echo -e "${BLUE}=== UPDATE ===${NC}"; L=$(get_local_version); R=$(get_remote_version_managed); echo "Local: $L | Remote: $R"; echo "1. Update Zoraxy | 2. System Update | r. Retour"; read -r -p "> " c; case "$c" in 1) if ask_sudo_gui; then wget -q --show-progress -O /tmp/z_new "https://github.com/$GITHUB_REPO/releases/download/$R/zoraxy_linux_amd64" && run_sudo systemctl stop $SERVICE_NAME && run_sudo mv $ZORAXY_HOME/zoraxy $ZORAXY_HOME/zoraxy.old && run_sudo mv /tmp/z_new $ZORAXY_HOME/zoraxy && run_sudo chmod +x $ZORAXY_HOME/zoraxy && echo "$R" | run_sudo tee "$VERSION_FILE" && run_sudo systemctl start $SERVICE_NAME && echo "OK"; pause; fi ;; 2) if ask_sudo_gui; then sudo apt update && sudo apt upgrade -y; pause; fi ;; r) return ;; esac; done
 }
 
-# --- 9. MAIN ---
+open_user_shell() { if ! ask_sudo_gui; then return; fi; echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"; trap - SIGINT SIGQUIT SIGTSTP; export SKIP_KIOSK_MENU=1; bash --login; unset SKIP_KIOSK_MENU; trap '' SIGINT SIGQUIT SIGTSTP; }
+spawn_restricted_shell() { local TD="$1"; local SN="$2"; [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"; echo -e "\n${GREEN}🔒 JAIL $SN${NC}"; local OH="$HOME"; bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'"); export HOME="$OH"; trap '' SIGINT SIGQUIT SIGTSTP; }
 
-# Longueur de la ligne d'en-tête (45 caractères)
+# --- 4. BOUCLE PRINCIPALE ---
 HEADER_LINE="#############################################"
-
 while true; do
     clear; check_requirements; get_sys_info
-    
-    # 1. État du service Zoraxy (vérifié)
     ST=$(systemctl is-active --quiet "$SERVICE_NAME" && echo "${GREEN}● ON${NC}" || echo "${RED}● OFF${NC}")
-    
-    # 2. État du pare-feu UFW (vérifié)
-    if run_sudo ufw status | grep -q "active"; then FW_ST="${GREEN}● ACTIF${NC}"; else FW_ST="${RED}● INACTIF${NC}"; fi
-    
-    # MODIFICATION D'ALIGNEMENT
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then FW_ST="${GREEN}● ACTIF${NC}"; else FW_ST="${RED}● INACTIF${NC}"; fi
+
     echo -e "${BLUE}$HEADER_LINE${NC}"
     echo -e "${BLUE}#         ZORAXY MANAGER - DASHBOARD        #${NC}"
     echo -e "${BLUE}$HEADER_LINE${NC}"
-    
-    # Ligne 1 : Statuts des services
+    printf "  🖥️  %-20s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
+    printf "  🧠 CPU: %-14s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
+    printf "  🏠 LAN: %-14s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
+    echo "---------------------------------------------"
     printf "  🔌 Zoraxy : %-15b | 🛡️  Pare-feu : %s\n" "$ST" "$FW_ST"
-    
-    # Ligne 2 : IP locale
-    echo -e "  💻 IP locale : ${YELLOW}$LOCAL_IP${NC}"
-    
-    # Ligne 3 : IP publique
-    echo -e "  🌍 IP publique : ${YELLOW}$PUBLIC_IP${NC}"
-    
+    printf "  ℹ️  Version : %-11s | ⚓ Port     : %s\n" "${CYAN}$APP_VER${NC}" "${YELLOW}$CURRENT_PORT${NC}"
     echo "---------------------------------------------"
-    echo -e "  ${GREEN}1.${NC} ▶️  Démarrer"
-    echo -e "  ${GREEN}2.${NC} ⏹️  Arrêter"
-    echo -e "  ${GREEN}3.${NC} 🔄 Redémarrer"
-    echo -e "  ${GREEN}4.${NC} 📜 Logs"
+    echo -e "${BOLD}--- SECTION SERVICE ---${NC}"
+    echo -e "  ${GREEN}1.${NC} 📜 Logs | ${GREEN}2.${NC} ⚙️  Gestion Daemon"
     echo ""
+    echo -e "${BOLD}--- SECTION PROXY ---${NC}"
+    echo -e "  ${GREEN}3.${NC} 🌐 VHosts (Proxys) - ${CYAN}Menu Principal${NC}"
+    echo -e "  ${GREEN}4.${NC} 🧱 Pare-Feu"
     echo -e "  ${GREEN}5.${NC} 📦 Sauvegardes"
-    echo -e "  ${GREEN}6.${NC} 🚀 Mises à jour (App & OS)"
-    echo -e "  ${GREEN}7.${NC} ⚙️  Config Daemon"
-    echo -e "  ${GREEN}8.${NC} 🌐 VHosts & SSL"
-    echo -e "  ${GREEN}9.${NC} 🛡️  Pare-Feu"
-    echo -e "  ${GREEN}10.${NC}🔒 Shell Restreint"
+    echo -e "  ${GREEN}6.${NC} 🚀 Mises à jour"
+    echo -e "  ${GREEN}7.${NC} 🔒 Shell Restreint"
     echo ""
-    echo -e "  ${RED}11.${NC}🔌 Éteindre"
-    echo -e "  ${RED}12.${NC}♻️  Reboot System"
+    echo -e "${BOLD}--- SECTION SYSTÈME ---${NC}"
+    echo -e "  ${RED}8.${NC} 🔌 Éteindre | ${RED}9.${NC} ♻️  Redémarrer"
     echo "---------------------------------------------"
-    echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin"
-    echo -e "  [${RED}exit${NC}]  🚪 Quitter"
+    echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin | [${RED}exit${NC}] Quitter"
     echo "---------------------------------------------"
     read -r -p "> " ch
 
     case "$ch" in
-        1) run_sudo systemctl start "$SERVICE_NAME"; sleep 1 ;;
-        2) run_sudo systemctl stop "$SERVICE_NAME"; sleep 1 ;;
-        3) run_sudo systemctl restart "$SERVICE_NAME"; sleep 1 ;;
-        4) trap - SIGINT; run_sudo journalctl -u "$SERVICE_NAME" -f -n 50; trap '' SIGINT ;;
+        1) trap - SIGINT; run_sudo journalctl -u "$SERVICE_NAME" -f -n 50; trap '' SIGINT ;;
+        2) menu_daemon_modern ;;
+        3) manage_zoraxy_menu ;;
+        4) firewall_manager ;;
         5) menu_backup ;;
         6) menu_update_center ;;
-        7) menu_config ;;
-        8) menu_vhost_ssl ;;
-        9) menu_firewall ;;
-        10) spawn_restricted_shell "$ZORAXY_HOME" "Config" ;;
-        11) server_power_action "ÉTEINDRE" "poweroff" ;;
-        12) server_power_action "REDÉMARRER" "reboot" ;;
+        7) spawn_restricted_shell "$ZORAXY_HOME" "Config" ;;
+        8) server_power_action "ÉTEINDRE" "poweroff" ;;
+        9) server_power_action "REDÉMARRER" "reboot" ;;
         admin) open_user_shell ;;
         exit|q) kill -9 $PPID; exit 0 ;;
-    esac
-done
     esac
 done
