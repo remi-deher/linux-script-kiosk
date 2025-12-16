@@ -155,7 +155,7 @@ open_user_shell() {
     echo -e "\n${GREEN}🔓 Accès autorisé.${NC} Tapez 'exit' pour revenir."
     trap - SIGINT SIGQUIT SIGTSTP
     export SKIP_KIOSK=1
-    cd "MARIADB_HOME" || cd "$HOME"
+    cd "$MARIADB_HOME" || cd "$HOME"
     bash --login
     unset SKIP_KIOSK
 
