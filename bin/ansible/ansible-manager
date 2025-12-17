@@ -1,7 +1,7 @@
 #!/bin/bash
-# ===============================
+# ======================================
 #  MANAGER ANSIBLE
-# ===============================
+# ======================================
 
 # --- SÉCURITÉ ---
 trap '' SIGINT SIGQUIT SIGTSTP
@@ -109,19 +109,19 @@ get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(curl -s -4 -m 1 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
-    
+
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-    
+
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-    
+
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/;s/ days/j/')
     APP_VER=$(ansible --version 2>/dev/null | head -n1 | awk '{print $NF}' | tr -d ']')
 
     if systemctl is-active --quiet cron; then SX="${GREEN}● ACTIF${NC}"; else SX="${RED}● OFF${NC}"; fi
-    
+
     # Check UFW status without blocking
     if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
         FW="${GREEN}● ACTIF${NC}"
@@ -178,7 +178,7 @@ module_assistant_dev() {
             echo -e "${GREEN}✅ Playbook généré : deploy_$rname.yml${NC}"
         fi; pause
     }
-    
+
     _create_playbook_wizard() {
         echo -e "\n${CYAN}--- NOUVEAU PLAYBOOK ---${NC}"
         read -p "Nom du fichier (ex: update_sys) : " p; [ -z "$p" ] && return
@@ -206,10 +206,10 @@ module_assistant_dev() {
         echo -e "$SEP"
         read -p "  Choix > " c
         case $c in
-            1) _create_role_wizard;; 
+            1) _create_role_wizard;;
             2) _create_playbook_wizard;;
             3) echo "Fonction Task Wizard"; pause ;;
-            4) echo "Fonction Var Wizard"; pause ;; 
+            4) echo "Fonction Var Wizard"; pause ;;
             5) echo "Fonction Delete Wizard"; pause ;;
             0) return;;
         esac
@@ -246,12 +246,12 @@ module_launcher() {
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
         echo -e "$SEP"
-        
+
         read -p "  Numéro du playbook > " idx
         if [ "$idx" == "0" ]; then return; fi
-        
+
         real_idx=$((idx-1))
-        
+
         if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$real_idx" -lt "${#files[@]}" ] && [ "$real_idx" -ge 0 ]; then
             sel="${files[$real_idx]}"
             echo -e "\n${CYAN}🚀 Lancement de : $sel${NC}"
@@ -313,10 +313,10 @@ module_backup_git() {
             echo -e "${BLUE}################################################${NC}"
             echo -e "${BLUE}#            PARAMÈTRES & CONFIG               #${NC}"
             echo -e "${BLUE}################################################${NC}"
-            
+
             curr_remote=$(git remote get-url origin 2>/dev/null || echo "${RED}Non défini${NC}")
             curr_user=$(git config user.name || echo "${RED}Inconnu${NC}")
-            
+
             echo -e "  📂 Dossier Local : ${YELLOW}$BACKUP_DIR${NC}"
             echo -e "  🔗 Remote Git    : ${CYAN}$curr_remote${NC}"
             echo -e "  👤 Identité Git  : ${CYAN}$curr_user${NC}"
@@ -327,7 +327,7 @@ module_backup_git() {
             echo -e "  ${GREEN}3.${NC} Configurer Identité (Nom/Email)"
             echo -e "  ${RED}0.${NC} Retour"
             echo -e "$SEP"
-            
+
             read -p "  Choix > " conf_choice
             case "$conf_choice" in
                 1)
@@ -369,7 +369,7 @@ module_backup_git() {
         echo "3. 💎 Les Deux (Recommandé)"
         echo "0. Annuler"
         read -p "> " choice
-        
+
         local sl=0; local sg=0; local al=0; local ag=0
 
         case "$choice" in
@@ -431,10 +431,10 @@ module_backup_git() {
         echo -e "${BLUE}################################################${NC}"
         echo -e "${GREY}Gérez vos versions Git et vos archives locales.${NC}"
         echo -e "$SEP"
-        
+
         if [ -d "$BACKUP_DIR" ]; then SL="${GREEN}Configuré${NC}"; else SL="${RED}Invalide${NC}"; fi
         if [ -d ".git" ]; then SG="${GREEN}Initialisé${NC}"; else SG="${RED}Absent${NC}"; fi
-        
+
         printf "  💾 Local : %-25b | 🐱 Git : %s\n" "$SL" "$SG"
         echo -e "$SEP"
 
@@ -469,7 +469,7 @@ module_backup_git() {
 # =======================================================
 module_project_config() {
     export EDITOR="nano"
-    
+
     cd "$ANSIBLE_ROOT" || return
     _check_gitignore
 
@@ -526,19 +526,19 @@ module_project_config() {
         if [ ! -f "$bkp" ]; then
             echo -e "${RED}Aucune sauvegarde (.ansible.cfg) trouvée.${NC}"; pause; return
         fi
-        
+
         echo -e "${YELLOW}COMPARAISON AVANT RESTAURATION :${NC}"
         echo -e "  ${RED}- Ligne actuelle (Va disparaître)${NC}"
         echo -e "  ${GREEN}+ Ligne de sauvegarde (Va être restaurée)${NC}"
         echo -e "$SEP"
-        
+
         # Affichage du diff
         if command -v diff > /dev/null; then
             diff -u --color=always "$cfg" "$bkp" 2>/dev/null || diff -u "$cfg" "$bkp"
         else
             echo -e "${GREY}(Commande diff introuvable, impossible de comparer)${NC}"
         fi
-        
+
         echo -e "$SEP"
         read -p "Écraser la config actuelle par la sauvegarde ? (o/n) " c
         if [ "$c" == "o" ]; then
@@ -557,32 +557,32 @@ module_project_config() {
         echo -e "${BLUE}--- $prompt ---${NC}"
         local i=1
         local valid_files=()
-        
+
         for f in "${files[@]}"; do
             is_locked=false
             if head -n 1 "$f" | grep -q "\$ANSIBLE_VAULT"; then is_locked=true; fi
             if [[ "$mode" == "OPEN" && "$is_locked" == "true" ]]; then continue; fi
             if [[ "$mode" == "LOCKED" && "$is_locked" == "false" ]]; then continue; fi
-            
+
             valid_files+=("$f")
             if [ "$is_locked" == "true" ]; then status="${RED}[🔒 LOCKED]${NC}"; else status="${GREEN}[🔓 OPEN]${NC}"; fi
             rel_path="${f#$ANSIBLE_ROOT/}"
-            
+
             # Affichage "dossier/fichier"
             dir_name=$(dirname "$rel_path")
             base_name=$(basename "$rel_path")
             if [ "$dir_name" == "." ]; then display_path="$base_name"; else display_path="${GREY}${dir_name}/${NC}${base_name}"; fi
-            
+
             printf "  [${GREEN}%d${NC}] %-50b %b\n" "$i" "$display_path" "$status"
             ((i++))
         done
-        
+
         if [ ${#valid_files[@]} -eq 0 ]; then echo -e "${YELLOW}Aucun fichier correspondant.${NC}"; return 1; fi
 
         echo -e "  [${RED}0${NC}] Annuler"
         read -p "  Numéro > " idx
         if [ "$idx" == "0" ]; then return 1; fi
-        
+
         real_idx=$((idx-1))
         if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$real_idx" -lt "${#valid_files[@]}" ] && [ "$real_idx" -ge 0 ]; then
             SELECTED_VAULT_FILE="${valid_files[$real_idx]}"
@@ -598,10 +598,10 @@ module_project_config() {
         echo -e "${BLUE}################################################${NC}"
         echo -e "${GREY}Gérez vos mots de passe et la config Ansible.${NC}"
         echo -e "$SEP"
-        
+
         if [ -f "$VAULT_PASS_FILE" ]; then VP="${GREEN}OK${NC}"; else VP="${RED}Manquant${NC}"; fi
         if [ -f "ansible.cfg" ]; then AC="${GREEN}Présent${NC}"; else AC="${YELLOW}Défaut${NC}"; fi
-        
+
         printf "  🔑 .vault_pass : %-20b | ⚙️  ansible.cfg : %s\n" "$VP" "$AC"
         echo -e "$SEP"
 
@@ -610,7 +610,7 @@ module_project_config() {
         echo -e "    ${GREEN}2.${NC} ⚙️  Éditer ansible.cfg (Backup auto)"
         echo -e "    ${YELLOW}3.${NC} 🔙 Restaurer ansible.cfg (Rollback)"
         echo ""
-        
+
         echo -e " ${BOLD}${CYAN}🔐 ACTIONS VAULT (CHIFFREMENT)${NC}"
         if [ ! -f "$VAULT_PASS_FILE" ]; then
             echo -e "    ${RED}⚠️  Créez d'abord le fichier .vault_pass (Option 1)${NC}"
@@ -620,11 +620,11 @@ module_project_config() {
             echo -e "    ${GREEN}6.${NC} 📝 Éditer (Liste uniquement les fichiers CHIFFRÉS)"
             echo -e "    ${GREEN}7.${NC} 👀 Voir (Liste uniquement les fichiers CHIFFRÉS)"
         fi
-        
+
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
         echo -e "$SEP"
-        
+
         read -p "  Choix > " c
         if [ "$c" == "0" ]; then return; fi
 
@@ -691,10 +691,10 @@ module_cron() {
         echo -e "${BLUE}################################################${NC}"
         echo -e "${GREY}Gérez l'exécution automatique de vos playbooks.${NC}"
         echo -e "$SEP"
-        
+
         echo -e "  👤 Utilisateur actuel : ${CYAN}$CRON_USER${NC}"
         echo -e "$SEP"
-        
+
         echo -e "  ${GREEN}1.${NC} 📝 Éditer la table Cron (Edit)"
         echo -e "  ${GREEN}2.${NC} 📄 Lister les tâches actuelles"
         echo -e "  ${GREEN}3.${NC} 📂 Voir les logs d'exécution (Syslog)"
@@ -702,13 +702,13 @@ module_cron() {
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
         echo -e "$SEP"
-        
+
         read -p "  Choix > " c
         case $c in
             1) sudo crontab -u "$CRON_USER" -e ;;
             2) echo -e "\n${CYAN}--- Tâches de $CRON_USER ---${NC}"; sudo crontab -u "$CRON_USER" -l; pause ;;
             3) sudo grep CRON /var/log/syslog | tail -n 20; pause ;;
-            4) 
+            4)
                 read -p "  Nouvel utilisateur pour Cron : " u
                 if id "$u" &>/dev/null; then
                     export CRON_USER="$u"
@@ -733,10 +733,10 @@ module_firewall() {
         echo -e "${BLUE}################################################${NC}"
         echo -e "${BLUE}#             PARE-FEU (UFW)                   #${NC}"
         echo -e "${BLUE}################################################${NC}"
-        
+
         # Statut sans blocage (si sudo NOPASSWD configuré)
         run_sudo_silent ufw status numbered || run_sudo ufw status numbered
-        
+
         echo -e "$SEP"
         echo -e "  ${GREEN}1.${NC} ➕ Ouvrir un Port (Allow)"
         echo -e "  ${GREEN}2.${NC} ➖ Supprimer une Règle (Delete)"
@@ -744,7 +744,7 @@ module_firewall() {
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
         echo -e "$SEP"
-        
+
         read -p "  Choix > " c
         case $c in
             1) read -p "Port (ex: 80/tcp) : " p; run_sudo ufw allow "$p"; pause ;;
@@ -756,23 +756,78 @@ module_firewall() {
 }
 
 # =======================================================
-# MODULE 8 : JAIL / SHELL RESTREINT 
+# MODULE 8 : JAIL / SHELL RESTREINT
 # =======================================================
 module_jail() {
-    local TD="$ANSIBLE_ROOT"
+    local TD
+    TD=$(readlink -f "$ANSIBLE_ROOT")
     local SN="Ansible"
-    [ ! -d "$TD" ] && mkdir -p "$TD"
 
-    echo -e "\n${GREEN}🔒 JAIL ACTIVÉE : $SN${NC}"
+    echo -e "\n${GREEN}🔒 SHELL RESTREINT ACTIVÉE : $SN (Stealth Mode)${NC}"
     echo -e "${GREY}Périmètre : $TD${NC}"
-    
-    # Sauvegarde HOME réel
+
+    local REAL_SUDO=$(which sudo)
     local OH="$HOME"
 
-    # Lance un bash avec un RC temporaire qui force le HOME et vérifie le path
-    bash --rcfile <(echo "export HOME='$TD'; export PS1='\[\033[01;34m\](Jail:$SN) \w \$ \[\033[00m\]'; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n\033[0;31m⛔ Sortie interdite.\033[0m\"; cd \"$TD\"; fi; }; export PROMPT_COMMAND='check_path'; cd \"$TD\"")
+    # Lancement du shell avec blocage de l'autocomplétion hors-zone
+    bash --rcfile <(echo "
+        export HOME='$TD'
+        export PS1='\[\033[01;31m\](Jail:$SN) \[\033[01;34m\]\w \$ \[\033[00m\]'
 
-    # Restauration
+        # 1. Moteur de surveillance de position
+        check_jail_breach() {
+            local current_phys
+            current_phys=\$(pwd -P)
+            if [[ \"\$current_phys\" != \"$TD\"* ]]; then
+                echo -e \"\n\033[0;31m⛔ ALERTE SÉCURITÉ : Tentative de sortie détectée.\033[0m\"
+                builtin cd \"$TD\"
+            fi
+        }
+
+        # 2. Blocage de l'autocomplétion hors périmètre
+        # On désactive la complétion standard des fichiers/commandes qui sortent du dossier
+        _jail_completion() {
+            local cur=\"\${COMP_WORDS[COMP_CWORD]}\"
+            # Si l'utilisateur tente de compléter un chemin absolu ou un retour en arrière
+            if [[ \"\$cur\" == /* || \"\$cur\" == *..* ]]; then
+                COMPREPLY=()
+            else
+                # On autorise uniquement la complétion des fichiers locaux
+                COMPREPLY=( \$(compgen -f -- \"\$cur\") )
+            fi
+        }
+        # Appliquer à cd, ls, nano, etc. (ou par défaut)
+        complete -F _jail_completion -D
+
+        # 3. Wrapper SUDO Inspecteur
+        sudo() {
+            local forbidden=false
+            for arg in \"\$@\"; do
+                if [[ \"\$arg\" == /* || \"\$arg\" == *..* ]]; then
+                    local abs_arg=\$(readlink -f \"\$arg\" 2>/dev/null)
+                    if [[ \"\$abs_arg\" != \"$TD\"* ]]; then forbidden=true; fi
+                fi
+            done
+
+            if [ \"\$forbidden\" = true ]; then
+                echo -e \"\033[0;31m❌ ACCÈS REFUSÉ : Hors périmètre.\033[0m\"
+                return 1
+            fi
+
+            if [[ \"\$1\" == \"bash\" || \"\$1\" == \"sh\" ]]; then
+                $REAL_SUDO bash --rcfile <(echo \"export PS1='[ROOT-JAIL] \w # '; check_jail_breach() { if [[ \\\$(pwd -P) != \\\"$TD\\\"* ]]; then builtin cd \\\"$TD\\\"; fi; }; export PROMPT_COMMAND='check_jail_breach'; cd \\\"$TD\\\"\")
+            else
+                $REAL_SUDO \"\$@\"
+            fi
+            check_jail_breach
+        }
+
+        export PROMPT_COMMAND='check_jail_breach'
+        alias su='echo ❌ Commande désactivée'
+
+        builtin cd \"$TD\"
+    ")
+
     export HOME="$OH"
     trap '' SIGINT SIGQUIT SIGTSTP
 }
@@ -798,11 +853,11 @@ open_user_shell() {
 while true; do
     clear
     get_sys_info
-    
+
     echo -e "${BLUE}###########################${NC}"
     echo -e "${BLUE}#       ANSIBLE MANAGER   #${NC}"
     echo -e "${BLUE}###########################${NC}"
-    
+
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
     printf "  🏠 LAN: ${YELLOW}%-23s${NC} | 🌍 WAN: ${YELLOW}%s${NC}\n" "$LOCAL_IP" "$PUBLIC_IP"
@@ -828,15 +883,15 @@ while true; do
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
     echo -e "    ${GREEN}8.${NC} 🔒 Shell Restreint (Jail)"
     echo -e "    ${GREEN}9.${NC} 📦 Mises à jour Système"
-    
+
     echo -e "$SEP_RED"
-    
+
     # Section 3
     echo -e " ${BOLD}${RED}💀 SYSTÈME${NC}"
     echo -e "    ${RED}10.${NC}🔌 Éteindre le serveur"
     echo -e "    ${RED}11.${NC}♻️  Redémarrer le serveur"
     echo -e "$SEP"
-    
+
     # Footer
     echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin    |    [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
@@ -851,13 +906,12 @@ while true; do
         5) module_inventory ;;
         6) module_cron ;;
         7) module_firewall ;;
-        8) module_jail ;; # Utilise maintenant la nouvelle fonction jail 
+        8) module_jail ;;
         9) module_updates ;;
         10) module_power "OFF" ;;
         11) module_power "REBOOT" ;;
         admin) open_user_shell ;;
-        exit|q) 
-            # Kill parent process (Exit like Zoraxy Manager) [cite: 113]
+        exit|q)
             kill -9 $PPID 2>/dev/null || exit 0
             ;;
         *) echo "Choix invalide."; sleep 0.5 ;;
