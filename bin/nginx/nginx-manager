@@ -1,20 +1,27 @@
 #!/bin/bash
-# ==============================
+# ===========================
 #  MANAGER SERVEUR WEB
-# ==============================
+# ===========================
 
-# --- CONFIGURATION ---
+# --- CONFIGURATION UTILISATEUR ---
+INFOMANIAK_TOKEN=""
+INFOMANIAK_DOMAIN_ID=""
+ZORAXY_PORT="8000"
+
+# --- CONFIGURATION SYSTEME ---
 DIR_WEB="/var/www"
 NGINX_HOME="/etc/nginx"
-DIR_PHP="/etc/php"
+SITES_AVAIL="$NGINX_HOME/sites-available"
+SITES_ENAB="$NGINX_HOME/sites-enabled"
 BACKUP_DIR="/var/backups/nginx-manager"
 LOG_ACCESS="/var/log/nginx/access.log"
 LOG_ERROR="/var/log/nginx/error.log"
-SERVICE_NAME="nginx"
-SITES_AVAIL="$NGINX_HOME/sites-available"
-SITES_ENAB="$NGINX_HOME/sites-enabled"
 
-# Cache & Config
+# --- CONFIGURATION ZORAXY (LAN) ---
+ZORAXY_API_URL="http://192.168.1.30:$ZORAXY_PORT"
+COOKIE_FILE="/tmp/zoraxy_cookie_manager.txt"
+
+# --- CACHE & UTILITAIRES ---
 PUBLIC_IP_CACHE="/tmp/nginx_public_ip"
 CMD_NGINX="/usr/sbin/nginx"
 CMD_UFW="/usr/sbin/ufw"
@@ -30,42 +37,27 @@ GREY=$'\033[1;30m'
 NC=$'\033[0m'
 BOLD=$'\033[1m'
 
-# --- 1. GESTION SUDO ---
+# =======================================================
+#  1. FONCTIONS SYSTÈME DE BASE
+# =======================================================
+
 ask_sudo_gui() {
-    if sudo -n true 2>/dev/null; then
-        return 0
-    fi
+    if sudo -n true 2>/dev/null; then return 0; fi
     echo -e "\n${YELLOW}🔒 Authentification requise${NC}"
     read -s -p "Mot de passe : " user_pass
     echo ""
-
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then
-        return 0
-    else
-        echo -e "${RED}❌ Incorrect.${NC}"
-        pause
-        return 1
-    fi
+    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Incorrect.${NC}"; pause; return 1; fi
 }
 
 run_sudo() {
-    if sudo -n "$@" 2>/dev/null; then
-        return 0
-    fi
-    if sudo -n true 2>/dev/null; then
-        sudo "$@"
-        return $?
-    fi
+    if sudo -n true 2>/dev/null; then sudo "$@"; return $?; fi
     if ! ask_sudo_gui; then return 1; fi
     sudo "$@"
 }
 
 run_sudo_silent() {
-    if sudo -n "$@" 2>/dev/null; then
-        return 0
-    fi
-    return 1
+    sudo -n "$@" 2>/dev/null
 }
 
 pause() {
@@ -73,37 +65,10 @@ pause() {
     read -p "Appuyez sur Entrée pour continuer..."
 }
 
-ensure_installed() {
-    local cmd="$1"
-    local pkg="$2"
-    if ! command -v "$cmd" &> /dev/null; then
-        echo -e "\n${YELLOW}⚠️  Outil requis manquant : '$cmd'${NC}"
-        read -p "Installer '$pkg' ? (o/n) " i
-        if [[ "$i" == "o" ]]; then
-            if ask_sudo_gui; then
-                run_sudo apt-get update -qq
-                run_sudo apt-get install -y "$pkg"
-            fi
-        else
-            return 1
-        fi
-    fi
-    return 0
-}
-
-server_power_action() {
-    local a="$1"
-    local c="$2"
-    local cw=$(echo "$a" | tr '[:upper:]' '[:lower:]' | sed 's/é/e/g')
-    echo -e "\n${RED}${BOLD}⚠️  ATTENTION : $a LE SYSTÈME${NC}"
-    read -p "Tapez '$cw' pour exécuter : " i
-    if [ "$i" == "$cw" ]; then
-        run_sudo $c
-        exit 0
-    else
-        echo "Annulé."
-        pause
-    fi
+ensure_requirements() {
+    if ! command -v jq &> /dev/null; then echo -e "${RED}Erreur: 'jq' requis.${NC}"; exit 1; fi
+    if ! command -v curl &> /dev/null; then echo -e "${RED}Erreur: 'curl' requis.${NC}"; exit 1; fi
+    if ! command -v git &> /dev/null; then echo -e "${RED}Erreur: 'git' requis.${NC}"; exit 1; fi
 }
 
 get_sys_info() {
@@ -114,577 +79,599 @@ get_sys_info() {
         PUBLIC_IP=$(curl -s -4 -m 3 https://icanhazip.com 2>/dev/null)
         [[ "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && echo "$PUBLIC_IP" > "$PUBLIC_IP_CACHE" || PUBLIC_IP="N/A"
     fi
-
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
-
-    CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
-    [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
-
-    RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-    SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/')
-
-    # --- CORRECTION VERSION NGINX ---
     APP_VER=$($CMD_NGINX -v 2>&1 | awk -F/ '{print $2}')
-    if [ -z "$APP_VER" ]; then
-        APP_VER=$(dpkg -s nginx 2>/dev/null | grep "Version" | awk '{print $2}' | cut -d: -f2 | cut -d- -f1)
-    fi
-    [ -z "$APP_VER" ] && APP_VER="Inconnue"
+    
+    if systemctl is-active --quiet nginx; then SX="${GREEN}● ON${NC}"; else SX="${RED}● OFF${NC}"; fi
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "active"; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
 }
 
-# --- 2. GESTION VHOSTS ---
+normalize_domain_input() {
+    local input="$1"
+    local base="$INFOMANIAK_DOMAIN_ID"
+    input="${input%.}" 
+    if [[ "$input" == *"$base" ]]; then
+        VAL_FQDN="$input"
+        VAL_SUB="${input%.$base}"
+    else
+        VAL_SUB="$input"
+        VAL_FQDN="${input}.${base}"
+    fi
+}
+
+# =======================================================
+#  2. MODULE API ZORAXY
+# =======================================================
+
+check_zoraxy_auth() {
+    [ ! -f "$COOKIE_FILE" ] && return 1
+    CHECK=$(curl -s -m 2 -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/api/auth/username")
+    [[ "$CHECK" == *\"* ]] && [[ "$CHECK" != *"error"* ]] && return 0
+    return 1
+}
+
+ensure_zoraxy_auth() {
+    if check_zoraxy_auth; then return 0; fi
+    echo -e "\n${CYAN}🔐 Authentification Zoraxy requise ($ZORAXY_API_URL)${NC}"
+    HOMEPAGE=$(curl -s -L -k -c "$COOKIE_FILE" -b "$COOKIE_FILE" "$ZORAXY_API_URL/" --max-time 2)
+    if [ $? -ne 0 ]; then echo -e "${RED}Zoraxy injoignable sur $ZORAXY_API_URL${NC}"; return 1; fi
+    CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+    while true; do
+        read -p "Utilisateur Zoraxy : " u
+        read -s -p "Mot de passe : " p
+        echo ""
+        curl -s -k -X POST -c "$COOKIE_FILE" -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" -d "username=$u" -d "password=$p" "$ZORAXY_API_URL/api/auth/login" > /dev/null
+        if check_zoraxy_auth; then echo -e "${GREEN}Connecté à Zoraxy.${NC}"; return 0;
+        else echo -e "${RED}Identifiants incorrects.${NC}"; return 1; fi
+    done
+}
+
+get_zoraxy_acls() {
+    if ! ensure_zoraxy_auth; then return 1; fi
+    curl -s -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/api/access/list" | jq -r '.[] | "\(.ID)|\(.Name)"' 2>/dev/null
+}
+
+add_zoraxy_host() {
+    local domain="$1"; local target="$2"; local acl="$3"
+    if ! ensure_zoraxy_auth; then return 1; fi
+    HOMEPAGE=$(curl -s -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/")
+    CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+    echo " > Zoraxy: Ajout Proxy $domain -> $target"
+    RESPONSE=$(curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" "$ZORAXY_API_URL/api/proxy/add" --data-urlencode "type=host" --data-urlencode "rootname=$domain" --data-urlencode "ep=$target" --data-urlencode "tls=false")
+    
+    # Check error
+    if echo "$RESPONSE" | grep -q "error"; then
+        echo -e "${RED}❌ Erreur Zoraxy Add:${NC} $RESPONSE"
+        return 1
+    fi
+
+    if [ -n "$acl" ]; then
+        echo " > Zoraxy: Application ACL..."
+        CSRF_TOKEN=$(curl -s -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+        curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" "$ZORAXY_API_URL/api/access/attach" --data-urlencode "id=$acl" --data-urlencode "host=$domain" > /dev/null
+    fi
+    echo -e "${GREEN}✅ Zoraxy configuré.${NC}"
+    return 0
+}
+
+request_zoraxy_ssl() {
+    local domain="$1"
+    if ! ensure_zoraxy_auth; then return 1; fi
+    echo -e " > Zoraxy: 🔑 Demande SSL (Let's Encrypt)..."
+    HOMEPAGE=$(curl -s -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/")
+    CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+    RESPONSE=$(curl -s -k -X POST -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" "$ZORAXY_API_URL/api/acme/obtain" --data-urlencode "domain=$domain" --data-urlencode "ca=letsencrypt") 
+    if echo "$RESPONSE" | grep -q "error"; then echo -e "${RED}❌ ERREUR ZORAXY API :${NC}"; echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"; else echo -e "${GREEN}✅ Demande envoyée.${NC}"; fi
+}
+
+delete_zoraxy_host() {
+    local domain="$1"
+    if ! ensure_zoraxy_auth; then return 1; fi
+    echo " > Zoraxy: Suppression Proxy $domain"
+    HOMEPAGE=$(curl -s -k -b "$COOKIE_FILE" "$ZORAXY_API_URL/")
+    CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+    curl -s -k -b "$COOKIE_FILE" -H "X-CSRF-Token: $CSRF_TOKEN" "$ZORAXY_API_URL/api/proxy/del" --data-urlencode "type=host" --data-urlencode "ep=$domain" > /dev/null
+    echo -e "${GREEN}✅ Zoraxy nettoyé.${NC}"
+}
+
+# =======================================================
+#  3. MODULE API INFOMANIAK
+# =======================================================
+
+create_infomaniak_record() {
+    local source_sub="$1"; local target="$2"; local record_type="CNAME"
+    if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then record_type="A"; echo " > Infomaniak: Détection IP -> Mode 'A'"; else echo " > Infomaniak: Détection Domaine -> Mode 'CNAME'"; fi
+    echo " > Infomaniak: Création $record_type $source_sub -> $target..."
+    JSON_DATA=$(jq -n --arg type "$record_type" --arg source "$source_sub" --arg target "$target" --arg ttl "3600" '{type: $type, source: $source, target: $target, ttl: $ttl|tonumber}')
+    RESPONSE=$(curl -s -X POST "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN_ID/dns/record" -H "Authorization: Bearer $INFOMANIAK_TOKEN" -H "Content-Type: application/json" -d "$JSON_DATA")
+    STATUS=$(echo "$RESPONSE" | jq -r '.result')
+    if [ "$STATUS" == "success" ]; then echo -e "${GREEN}✅ DNS créé.${NC}"; return 0; else echo -e "${RED}❌ Erreur Infomaniak:${NC}"; echo "$RESPONSE" | jq -r '.error.description // .'; return 1; fi
+}
+
+delete_infomaniak_record() {
+    local source_sub="$1"; echo " > Infomaniak: Recherche ID pour $source_sub..."
+    RECORD_ID=$(curl -s -X GET "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN_ID/dns/record" -H "Authorization: Bearer $INFOMANIAK_TOKEN" | jq -r --arg src "$source_sub" '.data[] | select(.source==$src) | .id' | head -n 1)
+    if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
+        echo " > Infomaniak: Suppression ID $RECORD_ID..."
+        curl -s -X DELETE "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN_ID/dns/record/$RECORD_ID" -H "Authorization: Bearer $INFOMANIAK_TOKEN" > /dev/null
+        echo -e "${GREEN}✅ DNS supprimé.${NC}"
+    else echo -e "${YELLOW}⚠️  Aucun enregistrement DNS trouvé.${NC}"; fi
+}
+
+# =======================================================
+#  4. GESTION DEPLOIEMENT & CONTENU
+# =======================================================
+
+handle_github_setup() {
+    local target_dir="$1"
+    local github_url="$2"
+    local web_root_suffix=""
+
+    echo -e "\n${BLUE}--- DÉPLOIEMENT GITHUB ---${NC}"
+    
+    if [ -d "$target_dir" ] && [ "$(ls -A "$target_dir")" ]; then
+        echo -e "${YELLOW}⚠️  Le dossier cible n'est pas vide. Suppression...${NC}"
+        run_sudo rm -rf "$target_dir"/*
+        run_sudo rm -rf "$target_dir"/.* 2>/dev/null
+    fi
+    
+    echo "Clonage de $github_url..."
+    if ! run_sudo git clone "$github_url" "$target_dir"; then
+        echo -e "${RED}❌ Échec du clonage Git.${NC}"; return 1;
+    fi
+
+    run_sudo chown -R $USER:www-data "$target_dir"
+    
+    # 1. COMPOSER (PHP)
+    if [ -f "$target_dir/composer.json" ]; then
+        echo -e "\n${CYAN}🐘 Fichier composer.json détecté.${NC}"
+        if command -v composer &> /dev/null; then
+            echo "Installation des dépendances PHP..."
+            cd "$target_dir" && composer install --no-dev --optimize-autoloader
+        else echo -e "${RED}⚠️  Composer n'est pas installé sur ce serveur.${NC}"; fi
+    fi
+
+    # 2. NPM (NODE/JS)
+    if [ -f "$target_dir/package.json" ]; then
+        echo -e "\n${CYAN}📦 Fichier package.json détecté.${NC}"
+        if command -v npm &> /dev/null; then
+            echo "Installation des dépendances Node..."
+            cd "$target_dir" && npm install
+            echo "Build des assets (npm run build)..."
+            cd "$target_dir" && npm run build 2>/dev/null || echo "Pas de script build trouvé."
+        else echo -e "${RED}⚠️  NPM n'est pas installé sur ce serveur.${NC}"; fi
+    fi
+
+    # 3. DÉTECTION DU DOSSIER PUBLIC
+    echo -e "\n${YELLOW}📂 Configuration de la racine web (Web Root)${NC}"
+    echo "Le serveur Nginx doit pointer vers le dossier public."
+    declare -a candidates; candidates+=("/")
+    for d in public web dist html build; do
+        [ -d "$target_dir/$d" ] && candidates+=("/$d")
+    done
+
+    echo -e "Dossiers trouvés :"
+    for i in "${!candidates[@]}"; do echo "  [$i] .${candidates[$i]}"; done
+    
+    read -p "Choisissez le dossier racine (défaut: 0 [Racine]) : " root_sel
+    if [[ "$root_sel" =~ ^[0-9]+$ ]] && [ "$root_sel" -le "${#candidates[@]}" ]; then
+        web_root_suffix="${candidates[$root_sel]}"
+        [ "$web_root_suffix" == "/" ] && web_root_suffix=""
+    else web_root_suffix=""; fi
+
+    echo -e "${GREEN}✅ Racine Web configurée : $target_dir$web_root_suffix${NC}"
+    run_sudo chown -R www-data:www-data "$target_dir"
+    echo "$web_root_suffix" > /tmp/nginx_webroot_suffix
+    return 0
+}
+
+# --- FONCTION DE ROLLBACK (SÉCURITÉ) ---
+perform_rollback() {
+    echo -e "\n${RED}${BOLD}🚨 ERREUR DÉTECTÉE - DÉBUT DU ROLLBACK AUTOMATIQUE${NC}"
+    
+    # 1. Supprimer Zoraxy
+    if [ "$RB_ZORAXY" -eq 1 ]; then
+        echo " 🔙 Suppression Zoraxy..."
+        delete_zoraxy_host "$VAL_FQDN"
+    fi
+
+    # 2. Supprimer DNS
+    if [ "$RB_DNS" -eq 1 ]; then
+        echo " 🔙 Suppression DNS..."
+        delete_infomaniak_record "$VAL_SUB"
+    fi
+
+    # 3. Supprimer Firewall
+    if [ "$RB_UFW" -eq 1 ]; then
+        echo " 🔙 Fermeture Port $RB_PORT..."
+        run_sudo ufw delete allow "$RB_PORT/tcp" >/dev/null
+    fi
+
+    # 4. Supprimer Nginx
+    if [ "$RB_NGINX" -eq 1 ]; then
+        echo " 🔙 Suppression Config Nginx..."
+        run_sudo rm "$SITES_AVAIL/$VAL_FQDN.conf" 2>/dev/null
+        run_sudo rm "$SITES_ENAB/$VAL_FQDN.conf" 2>/dev/null
+        run_sudo systemctl reload nginx
+    fi
+
+    # 5. Supprimer Dossier
+    if [ "$RB_FOLDER" -eq 1 ]; then
+        echo " 🔙 Suppression Dossier Web..."
+        run_sudo rm -rf "$DIR_WEB/$VAL_FQDN"
+    fi
+
+    echo -e "${RED}❌ Opération annulée et nettoyage effectué.${NC}"
+    pause
+}
+
+# --- NOYAU DE DEPLOIEMENT ---
+core_deployment_wizard() {
+    local mode="$1"; local source_type="$2"; local github_url="$3"
+    
+    # VARIABLES ROLLBACK
+    RB_FOLDER=0; RB_NGINX=0; RB_UFW=0; RB_DNS=0; RB_ZORAXY=0; RB_PORT=""
+
+    echo -e "\n${BLUE}=== CONFIGURATION DU SITE ($mode) ===${NC}"
+    read -p "Sous-domaine (ex: 'app') : " raw_input; [ -z "$raw_input" ] && return
+    normalize_domain_input "$raw_input"
+    echo -e "   -> Domaine complet : ${CYAN}$VAL_FQDN${NC}"
+    
+    read -p "Port Nginx Local (ex: 8081) : " port; [ -z "$port" ] && return
+    RB_PORT="$port"
+    
+    local default_target="$INFOMANIAK_DOMAIN_ID"
+    [ "$mode" == "lan" ] && default_target="$LOCAL_IP"
+    echo -e "Cible DNS (Entrée = ${GREEN}$default_target${NC}) :"
+    read -p " > " dns_target
+    [ -z "$dns_target" ] && dns_target="$default_target"
+    if [[ ! "$dns_target" =~ ^[0-9]+ ]]; then [[ "$dns_target" != *.* ]] && dns_target="${dns_target}.${INFOMANIAK_DOMAIN_ID}"; fi
+    [[ "$dns_target" == "$VAL_FQDN" ]] && dns_target="$default_target"
+
+    # ACL
+    SELECTED_ACL_ID=""; SELECTED_ACL_NAME="Aucune (Public)"
+    if [ "$mode" == "lan" ]; then
+        echo -e "\n${YELLOW}🔍 Configuration ACL (Réseau Local)${NC}"
+        RAW_ACLS=$(get_zoraxy_acls)
+        AUTO_ACL_ID=$(echo "$RAW_ACLS" | grep -iE "LAN|Local|Private" | head -n 1 | cut -d'|' -f1)
+        AUTO_ACL_NAME=$(echo "$RAW_ACLS" | grep -iE "LAN|Local|Private" | head -n 1 | cut -d'|' -f2)
+        if [ -n "$AUTO_ACL_ID" ]; then SELECTED_ACL_ID="$AUTO_ACL_ID"; SELECTED_ACL_NAME="$AUTO_ACL_NAME"; echo -e "✅ ACL Automatique : ${GREEN}$SELECTED_ACL_NAME${NC}"; else
+            declare -a ACL_IDS; declare -a ACL_NAMES; local i=1
+            while IFS='|' read -r id name; do
+                display_name="${name:-$id}"; echo "  $i. $display_name"; ACL_IDS+=("$id"); ACL_NAMES+=("$display_name"); ((i++))
+            done <<< "$RAW_ACLS"
+            read -p "Numéro ACL : " acl_idx
+            if [[ "$acl_idx" =~ ^[0-9]+$ ]]; then SELECTED_ACL_ID="${ACL_IDS[$((acl_idx-1))]}"; SELECTED_ACL_NAME="${ACL_NAMES[$((acl_idx-1))]}"; fi
+        fi
+    fi
+
+    echo -e "\n${YELLOW}🔑 SSL / HTTPS${NC}"
+    echo "Générer un certificat SSL (Let's Encrypt) ?"
+    read -p " (o/n) > " ssl_choice
+
+    read -p "Confirmer le déploiement ? (o/n) : " c; if [ "$c" != "o" ]; then return; fi
+
+    # --- INSTALLATION AVEC ROLLBACK ---
+    
+    echo -e "\n${BOLD}[1/6] Installation du contenu...${NC}"
+    if ! ask_sudo_gui; then return; fi
+    
+    docroot="$DIR_WEB/$VAL_FQDN"
+    if [ ! -d "$docroot" ]; then run_sudo mkdir -p "$docroot"; RB_FOLDER=1; fi
+    
+    WEB_ROOT_SUFFIX=""
+    if [ "$source_type" == "github" ]; then
+        handle_github_setup "$docroot" "$github_url"
+        if [ $? -ne 0 ]; then perform_rollback; return; fi
+        WEB_ROOT_SUFFIX=$(cat /tmp/nginx_webroot_suffix 2>/dev/null)
+        rm /tmp/nginx_webroot_suffix 2>/dev/null
+    else
+        echo "<h1>Site $VAL_FQDN</h1><p>Mode: $mode</p>" | run_sudo tee "$docroot/index.html" >/dev/null
+        run_sudo chown -R www-data:www-data "$docroot"
+    fi
+
+    echo -e "\n${BOLD}[2/6] Configuration Nginx...${NC}"
+    conf="$SITES_AVAIL/$VAL_FQDN.conf"
+    cat <<EOF | run_sudo tee "$conf" > /dev/null
+server {
+    listen $port;
+    server_name $VAL_FQDN _;
+    root $docroot$WEB_ROOT_SUFFIX;
+    index index.html index.php;
+    absolute_redirect off;
+    access_log /var/log/nginx/${VAL_SUB}_access.log;
+    error_log /var/log/nginx/${VAL_SUB}_error.log;
+    location / { try_files \$uri \$uri/ =404; }
+}
+EOF
+    RB_NGINX=1
+    run_sudo ln -sf "$conf" "$SITES_ENAB/$VAL_FQDN.conf"
+    if ! run_sudo systemctl reload nginx; then echo "Erreur Reload Nginx"; perform_rollback; return; fi
+
+    echo -e "${BOLD}[3/6] Firewall...${NC}"; 
+    run_sudo ufw allow "$port/tcp" >/dev/null
+    RB_UFW=1
+
+    echo -e "${BOLD}[4/6] DNS Infomaniak...${NC}"; 
+    create_infomaniak_record "$VAL_SUB" "$dns_target"
+    if [ $? -ne 0 ]; then perform_rollback; return; fi
+    RB_DNS=1
+
+    echo -e "${BOLD}[5/6] Zoraxy Proxy...${NC}"; 
+    add_zoraxy_host "$VAL_FQDN" "$LOCAL_IP:$port" "$SELECTED_ACL_ID"
+    if [ $? -ne 0 ]; then perform_rollback; return; fi
+    RB_ZORAXY=1
+    
+    if [[ "$ssl_choice" == "o" || "$ssl_choice" == "O" || "$ssl_choice" == "y" ]]; then
+        echo -e "${BOLD}[6/6] SSL...${NC}"; request_zoraxy_ssl "$VAL_FQDN"
+    else echo -e "${BOLD}[6/6] SSL ignoré.${NC}"; fi
+
+    echo -e "\n${GREEN}🎉 Terminé !${NC}"
+    read -p "Voulez-vous éditer le fichier Nginx maintenant ? (o/n) " ed
+    if [ "$ed" == "o" ]; then run_sudo nano "$conf"; run_sudo systemctl reload nginx; fi
+    pause
+}
+
+# --- MENU CRÉATION (ETAPE 1 : SOURCE) ---
+wizard_new_site_menu() {
+    clear
+    echo -e "${BLUE}################################################${NC}"
+    echo -e "${BLUE}#           CRÉATION D'UN NOUVEAU SITE         #${NC}"
+    echo -e "${BLUE}################################################${NC}"
+    echo ""
+    echo -e "${BOLD}ÉTAPE 1 : SOURCE DU SITE${NC}"
+    echo -e "${GREEN}1. 📄 Site Vierge${NC}        ${GREY}(Commencez de zéro avec une page simple)${NC}"
+    echo -e "${YELLOW}2. 🐙 Import GitHub${NC}      ${GREY}(Clone projet + Dépendances)${NC}"
+    echo -e "${RED}0. Retour${NC}"
+    echo ""
+    read -p "Choix > " src_choice
+    
+    source_type="vierge"
+    github_url=""
+    
+    case "$src_choice" in
+        1) source_type="vierge" ;;
+        2) 
+            source_type="github"
+            read -p "URL du dépôt GitHub : " github_url
+            [ -z "$github_url" ] && return
+            ;;
+        0) return ;;
+        *) echo "Invalide"; pause; return ;;
+    esac
+
+    echo -e "\n${BOLD}ÉTAPE 2 : ACCESSIBILITÉ${NC}"
+    echo -e "${GREEN}1. 🌍 SITE PUBLIC${NC}        ${GREY}(Ex: Blog, Portfolio - Accessible Internet)${NC}"
+    echo -e "${YELLOW}2. 🏠 SITE PRIVÉ${NC}         ${GREY}(Ex: NAS, Admin - Accessible Réseau de la pharmacie)${NC}"
+    echo ""
+    read -p "Choix > " access_type
+    
+    case "$access_type" in
+        1) core_deployment_wizard "public" "$source_type" "$github_url" ;;
+        2) 
+            echo -e "\n${YELLOW}--- Options Site Privé ---${NC}"
+            echo "1. Avec Nom de Domaine (Recommandé)"
+            echo "2. Par IP Directe (Simple)"
+            read -p "> " sub
+            [ "$sub" == "1" ] && core_deployment_wizard "lan" "$source_type" "$github_url"
+            [ "$sub" == "2" ] && echo "Mode IP simple non compatible avec GitHub auto." && pause
+            ;;
+    esac
+}
+
+create_simple_vhost_wizard() {
+    echo -e "\n${GREEN}➕ SITE SIMPLE (IP:PORT)${NC}"
+    echo "Ce site sera accessible via http://$LOCAL_IP:PORT"
+    read -p "Nom du projet (nom dossier) : " d; [ -z "$d" ] && return
+    read -p "Port à ouvrir : " port; [ -z "$port" ] && return
+    if ! ask_sudo_gui; then return; fi
+    
+    setup_site_content "$DIR_WEB/$d" "Local"
+
+    conf="$SITES_AVAIL/$d.conf"
+    cat <<EOF | run_sudo tee "$conf" > /dev/null
+server {
+    listen $port;
+    server_name _;
+    root $DIR_WEB/$d;
+    index index.html;
+    absolute_redirect off;
+}
+EOF
+    run_sudo ln -sf "$conf" "$SITES_ENAB/$d.conf"
+    run_sudo ufw allow "$port/tcp" >/dev/null
+    run_sudo systemctl reload nginx
+    echo -e "\n${GREEN}✅ Site actif sur : http://$LOCAL_IP:$port${NC}"; pause
+}
+
+# --- ACTIONS SUPPLEMENTAIRES ---
+
+action_toggle_vhost() {
+    refresh_vhost_list; read -p "Site # (0=Retour) : " sel; [ "$sel" == "0" ] && return
+    f="${VHOST_FILES[$((sel-1))]}"; bn=$(basename "$f")
+    if ask_sudo_gui; then
+        if ls "$SITES_ENAB/$bn"* 1>/dev/null 2>&1; then run_sudo rm "$SITES_ENAB/$bn"*; else run_sudo ln -sf "$f" "$SITES_ENAB/$bn"; fi
+        run_sudo systemctl reload nginx; pause
+    fi
+}
+
+action_edit_vhost() {
+    refresh_vhost_list; read -p "Site # (0=Retour) : " sel; [ "$sel" == "0" ] && return
+    f="${VHOST_FILES[$((sel-1))]}"
+    if ask_sudo_gui; then
+        run_sudo cp "$f" "$f.bak_tmp"; run_sudo nano "$f"
+        if run_sudo nginx -t; then run_sudo rm "$f.bak_tmp"; run_sudo systemctl reload nginx; else echo "${RED}Erreur Syntaxe!${NC}"; run_sudo mv "$f.bak_tmp" "$f"; fi
+        pause
+    fi
+}
+
+action_ssl_retry() {
+    refresh_vhost_list; read -p "Site # (0=Retour) : " sel; [ "$sel" == "0" ] && return
+    f="${VHOST_FILES[$((sel-1))]}"; filename=$(basename "$f"); domain_conf="${filename%.*}"
+    request_zoraxy_ssl "$domain_conf"; pause
+}
+
+action_delete_wizard() {
+    refresh_vhost_list; read -p "Site # à SUPPRIMER (0=Retour) : " sel; [ "$sel" == "0" ] && return
+    f="${VHOST_FILES[$((sel-1))]}"; filename=$(basename "$f"); domain_conf="${filename%.*}"
+    content=$(sudo cat "$f" 2>/dev/null); target_port=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | head -n1)
+    normalize_domain_input "$domain_conf"
+    
+    echo -e "${RED}SUPPRESSION : $filename (Port $target_port)${NC}"
+    read -p "Confirmer ? (oui) : " c; if [ "$c" != "oui" ]; then return; fi
+    if ! ask_sudo_gui; then return; fi
+
+    if [[ "$domain_conf" == *"$INFOMANIAK_DOMAIN_ID" ]]; then
+        delete_infomaniak_record "$VAL_SUB"; delete_zoraxy_host "$VAL_FQDN"
+    fi
+    [ -n "$target_port" ] && run_sudo ufw delete allow "$target_port/tcp" >/dev/null
+    run_sudo rm "$f"; target_link=$(find "$SITES_ENAB" -name "$filename*"); [ -n "$target_link" ] && run_sudo rm "$target_link"
+    run_sudo systemctl reload nginx
+    read -p "Supprimer dossier web ? (o/n) " dw; [ "$dw" == "o" ] && run_sudo rm -rf "$DIR_WEB/$domain_conf"
+    echo "Terminé."; pause
+}
+
+# =======================================================
+#  6. MENU PRINCIPAL DE GESTION DES SITES
+# =======================================================
 
 declare -a VHOST_FILES
-
 refresh_vhost_list() {
     VHOST_FILES=()
     shopt -s nullglob
     local files=("$SITES_AVAIL"/*)
     shopt -u nullglob
-
-    echo -e "${BLUE}=== LISTE DES VHOSTS ===${NC}"
-    printf "${GREY}%-3s %-25s %-10s %-30s %-10s${NC}\n" "ID" "DOMAINE" "PORT" "RACINE" "ÉTAT"
-    echo "--------------------------------------------------------------------------------"
-
-    if [ ${#files[@]} -eq 0 ]; then
-        echo "   (Aucun site configuré)"
-    else
+    echo -e "${BLUE}=== LISTE DES SITES ACTUELS ===${NC}"
+    printf "${GREY}%-3s %-30s %-8s %-10s${NC}\n" "ID" "DOMAINE / NOM" "PORT" "ÉTAT"
+    echo "--------------------------------------------------------"
+    if [ ${#files[@]} -eq 0 ]; then echo "   (Aucun site configuré)"; else
         local i=1
         for f in "${files[@]}"; do
             VHOST_FILES+=("$f")
-            bn=$(basename "$f")
-            bn_noext="${bn%.*}"
-
-            # État
-            if ls "$SITES_ENAB/$bn"* 1> /dev/null 2>&1; then
-                st="${GREEN}● ON${NC}"
-            else
-                st="${RED}● OFF${NC}"
-            fi
-
-            # Lecture contenu (Optimisée)
-            if [ -r "$f" ]; then
-                content=$(cat "$f" 2>/dev/null)
-            else
-                content=$(sudo cat "$f" 2>/dev/null)
-            fi
-
-            # Parsing
+            bn=$(basename "$f"); bn_noext="${bn%.*}"
+            st=$(ls "$SITES_ENAB/$bn"* 1> /dev/null 2>&1 && echo "${GREEN}ON${NC}" || echo "${RED}OFF${NC}")
+            content=$(sudo cat "$f" 2>/dev/null)
             port=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | head -n1)
             [ -z "$port" ] && port="-"
-            root=$(echo "$content" | grep -E "^\s*root\s+" | awk '{print $2}' | tr -d ';')
-            [ -z "$root" ] && root="-"
-
-            printf "%-3s %-25s %-10s %-30s %b\n" "$i" "${bn_noext:0:24}" "$port" "${root:0:29}" "$st"
+            printf "%-3s %-30s %-8s %b\n" "$i" "${bn_noext:0:28}" "$port" "$st"
             ((i++))
         done
     fi
-    echo "--------------------------------------------------------------------------------"
-}
-
-create_vhost_wizard() {
-    echo -e "\n${GREEN}➕ AJOUTER UN NOUVEAU SITE${NC}"
-    read -p "Nom de domaine (ex: site.lan) : " domain
-    [ -z "$domain" ] && return
-
-    read -p "Port d'écoute (ex: 80) : " port
-    port=${port:-80}
-
-    read -p "Dossier racine (défaut: $DIR_WEB/$domain) : " docroot
-    docroot=${docroot:-"$DIR_WEB/$domain"}
-
-    if ! ask_sudo_gui; then return; fi
-
-    # Création dossier
-    if [ ! -d "$docroot" ]; then
-        run_sudo mkdir -p "$docroot"
-        echo "<h1>Site $domain</h1>" | run_sudo tee "$docroot/index.html" >/dev/null
-        run_sudo chown -R www-data:www-data "$docroot"
-        run_sudo chmod -R 755 "$docroot"
-        echo "Dossier $docroot créé."
-    fi
-
-    # Config Nginx
-    conf="$SITES_AVAIL/$domain.conf"
-    run_sudo bash -c "cat > '$conf' <<EOF
-server {
-    listen $port;
-    server_name $domain;
-    root $docroot;
-    index index.html index.htm index.php;
-    access_log /var/log/nginx/${domain}_access.log;
-    error_log /var/log/nginx/${domain}_error.log;
-    location / { try_files \$uri \$uri/ =404; }
-}
-EOF"
-
-    # Activation
-    run_sudo ln -sf "$conf" "$SITES_ENAB/$domain.conf"
-    run_sudo ufw allow "$port/tcp" >/dev/null
-
-    if run_sudo nginx -t; then
-        run_sudo systemctl reload nginx
-        echo -e "${GREEN}✅ Site actif sur le port $port !${NC}"
-    else
-        echo -e "${RED}❌ Erreur config Nginx.${NC}"
-        run_sudo rm "$SITES_ENAB/$domain.conf"
-    fi
-    pause
-}
-
-action_toggle_vhost() {
-    read -p "Numéro du site à basculer (ON/OFF) : " sel
-    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
-        f="${VHOST_FILES[$((sel-1))]}"
-        bn=$(basename "$f")
-        if ! ask_sudo_gui; then return; fi
-
-        target=$(find "$SITES_ENAB" -name "$bn*")
-        if [ -n "$target" ]; then
-            run_sudo rm "$target"
-            echo -e "${RED}Site désactivé.${NC}"
-        else
-            run_sudo ln -sf "$f" "$SITES_ENAB/$bn"
-            echo -e "${GREEN}Site activé.${NC}"
-        fi
-        run_sudo systemctl reload nginx
-        pause
-    else
-        echo "Numéro invalide."
-        sleep 1
-    fi
-}
-
-action_delete_vhost() {
-    read -p "Numéro du site à SUPPRIMER : " sel
-    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
-        f="${VHOST_FILES[$((sel-1))]}"
-        bn=$(basename "$f")
-        echo -e "${RED}ATTENTION : Suppression de $bn${NC}"
-        read -p "Confirmer ? (o/n) : " c
-        if [ "$c" == "o" ] && ask_sudo_gui; then
-            target=$(find "$SITES_ENAB" -name "$bn*")
-            [ -n "$target" ] && run_sudo rm "$target"
-            run_sudo mkdir -p "$BACKUP_DIR"
-            run_sudo cp "$f" "$BACKUP_DIR/deleted_$bn.conf"
-            run_sudo rm "$f"
-            run_sudo systemctl reload nginx
-            echo "Supprimé."
-            pause
-        fi
-    fi
-}
-
-action_edit_vhost() {
-    read -p "Numéro du site à modifier : " sel
-    if [[ "$sel" =~ ^[0-9]+$ ]] && [ "$sel" -ge 1 ] && [ "$sel" -le "${#VHOST_FILES[@]}" ]; then
-        f="${VHOST_FILES[$((sel-1))]}"
-        if ask_sudo_gui; then
-            run_sudo nano "$f"
-            echo "Vérification..."
-            if run_sudo nginx -t; then
-                run_sudo systemctl reload nginx
-                echo "Config rechargée."
-            else
-                echo "${RED}Erreur syntaxe!${NC}"
-            fi
-            pause
-        fi
-    fi
+    echo "--------------------------------------------------------"
 }
 
 manage_nginx_sites_menu() {
-    if [ ! -r "$SITES_AVAIL" ]; then ask_sudo_gui; fi
     while true; do
         clear
-        refresh_vhost_list
-        echo -e "${BOLD}--- ACTIONS ---${NC}"
-        echo -e "  ${GREEN}1.${NC} ➕ Ajouter un site"
-        echo -e "  ${YELLOW}2.${NC} ⏯️  Activer / Désactiver"
-        echo -e "  ${CYAN}3.${NC} 📝 Modifier"
-        echo -e "  ${RED}4.${NC} 🗑️  Supprimer"
-        echo -e "  ${RED}r.${NC} Retour"
-        read -r -p "> " ch
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#           GESTION DES SITES WEB              #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${CYAN}Administration centralisée Nginx + Zoraxy + DNS${NC}"
+        echo ""
+        
+        echo -e "  ${GREEN}1.${NC} ✨ Créer un Site         ${GREY}: Assistant (Vierge / GitHub)${NC}"
+        echo -e "  ${YELLOW}2.${NC} ⏯️  Activer / Désactiver ${GREY}: ON/OFF sans supprimer${NC}"
+        echo -e "  ${CYAN}3.${NC} 📝 Éditer Config         ${GREY}: Modifier VHost${NC}"
+        echo -e "  ${RED}4.${NC} 🗑️  Supprimer un Site    ${GREY}: Nettoyage complet${NC}"
+        echo -e "  ${BLUE}7.${NC} 🔑 Réparer SSL           ${GREY}: Forcer certificat${NC}"
+        echo -e "  ${RED}0.${NC} 🔙 Retour"
+        read -r -p "Choix > " ch
         case "$ch" in
-            1) create_vhost_wizard ;;
+            1) wizard_new_site_menu ;;
             2) action_toggle_vhost ;;
             3) action_edit_vhost ;;
-            4) action_delete_vhost ;;
-            r) break ;;
-            *) echo "Invalide"; sleep 0.5 ;;
+            4) action_delete_wizard ;;
+            7) action_ssl_retry ;;
+            0) break ;;
         esac
     done
 }
 
-# --- 3. AUTRES FONCTIONS & PARE-FEU UNIFIÉ ---
-
-firewall_checkbox_delete() {
-    mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-    if [ ${#RULES[@]} -eq 0 ]; then echo "Aucune règle."; pause; return; fi
-
-    declare -a SEL; for i in "${!RULES[@]}"; do SEL[$i]=false; done
-
-    while true; do
-        clear
-        echo -e "${RED}${BOLD}SUPPRESSION RÈGLES (Cochez pour supprimer)${NC}"
-        for i in "${!RULES[@]}"; do
-            NUM=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-            DESC=$(echo "${RULES[$i]}" | sed -E 's/^\[[ 0-9]+\] //')
-            if [ "${SEL[$i]}" == "true" ]; then M="${RED}[X]${NC}"; else M="${GREEN}[ ]${NC}"; fi
-            printf " %b | %2s | %s\n" "$M" "$NUM" "$DESC"
-        done
-        echo "------------------------------------------------"
-        echo -e "  [Num] Basculer | [a] Tout | [n] Rien"
-        echo -e "  [v]   VALIDER | [r] Retour"
-        read -r -p "> " k
-
-        if [[ "$k" =~ ^[0-9]+$ ]]; then
-            for i in "${!RULES[@]}"; do
-                rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-                if [ "$rn" == "$k" ]; then
-                    if [ "${SEL[$i]}" == "true" ]; then SEL[$i]=false; else SEL[$i]=true; fi
-                fi
-            done
-        elif [ "$k" == "v" ]; then
-            declare -a DELS
-            for i in "${!RULES[@]}"; do
-                if [ "${SEL[$i]}" == "true" ]; then
-                    rn=$(echo "${RULES[$i]}" | sed -E 's/^\[([ 0-9]+)\].*/\1/' | xargs)
-                    DELS+=("$rn")
-                fi
-            done
-            if [ ${#DELS[@]} -gt 0 ]; then
-                if ask_sudo_gui; then
-                    SORTED=$(printf "%s\n" "${DELS[@]}" | sort -nr)
-                    for n in $SORTED; do echo "Suppression règle #$n..."; yes | sudo ufw delete "$n" >/dev/null; done
-                    echo -e "${GREEN}Terminé.${NC}"; pause; break
-                fi
-            else echo "Aucune sélection."; pause; fi
-        elif [ "$k" == "r" ]; then break
-        elif [ "$k" == "a" ]; then for i in "${!RULES[@]}"; do SEL[$i]=true; done
-        elif [ "$k" == "n" ]; then for i in "${!RULES[@]}"; do SEL[$i]=false; done
-        fi
-    done
-}
+# =======================================================
+#  7. MENU SYSTEME & LOOP
+# =======================================================
 
 firewall_manager() {
     while true; do
-        clear
-        if run_sudo_silent ufw status | grep -q "active"; then ST="${GREEN}ACTIF${NC}"; else ST="${RED}INACTIF${NC}"; fi
-        echo -e "${BLUE}=== GESTION PARE-FEU ($ST) ===${NC}"
-
-        mapfile -t RULES < <(run_sudo ufw status numbered | grep "^\[")
-        if [ ${#RULES[@]} -eq 0 ]; then echo "   (Aucune règle)"; else
-            for line in "${RULES[@]}"; do
-                echo "$line" | sed "s/ALLOW/${GREEN}ALLOW${NC}/" | sed "s/DENY/${RED}DENY${NC}/"
-            done
-        fi
-
-        echo "------------------------------------------------"
-        echo -e "  ${GREEN}1.${NC} 🔑 Ouvrir SSH (22)"
-        echo -e "  ${GREEN}2.${NC} 🌍 Ouvrir HTTP/HTTPS (80, 443)"
-        echo -e "  ${GREEN}3.${NC} ➕ Ouvrir Port Manuel"
-        echo -e "  ${GREEN}4.${NC} ⚡ Activer UFW (Enable)"
-        echo -e "  ${RED}5.${NC} 🗑️  Supprimer des règles (Sélection)"
-        echo -e "  ${RED}6.${NC} 🛑 Désactiver UFW (Disable)"
-        echo "------------------------------------------------"
-        echo -e "  ${RED}0.${NC} 🔙 Retour au menu principal"
-        read -r -p "Choix > " c
-
+        clear; echo -e "${BLUE}=== GESTION PARE-FEU ===${NC}"
+        run_sudo ufw status numbered
+        echo -e "1. Ouvrir Port | 2. Supprimer Règle | 0. Retour"
+        read -r -p "> " c
         case "$c" in
-            1) if ask_sudo_gui; then run_sudo ufw allow 22/tcp; echo "OK"; pause; fi ;;
-            2) if ask_sudo_gui; then run_sudo ufw allow 80/tcp; run_sudo ufw allow 443/tcp; echo "OK"; pause; fi ;;
-            3) read -p "Port : " p; [ -n "$p" ] && if ask_sudo_gui; then run_sudo ufw allow "$p"; pause; fi ;;
-            4) if ask_sudo_gui; then run_sudo ufw enable; pause; fi ;;
-            5) firewall_checkbox_delete ;;
-            6) if ask_sudo_gui; then run_sudo ufw disable; pause; fi ;;
+            1) read -p "Port: " p; [ -n "$p" ] && ask_sudo_gui && run_sudo ufw allow "$p"; pause ;;
+            2) read -p "Numéro: " n; [ -n "$n" ] && ask_sudo_gui && echo "y" | run_sudo ufw delete "$n"; pause ;;
             0) return ;;
         esac
     done
 }
 
-deploy_from_github() {
-    clear
-    echo -e "${BLUE}--- DÉPLOIEMENT GITHUB ---${NC}"
-    ensure_installed "git" "git" || return
-
-    read -p "URL dépôt : " repo_url
-    [ -z "$repo_url" ] && return
-
-    echo -e "Dest: ${CYAN}$DIR_WEB/<dossier>${NC}"
-    read -p "Nom dossier : " folder_name
-    [ -z "$folder_name" ] && return
-
-    TARGET="$DIR_WEB/$folder_name"
-    if [ -d "$TARGET" ]; then
-        read -p "Dossier existe. Supprimer ? (o/n) " d
-        [[ "$d" == "o" ]] && run_sudo rm -rf "$TARGET" || return
-    fi
-
-    if run_sudo git clone "$repo_url" "$TARGET"; then
-        echo "${GREEN}Cloné.${NC}"
-    else
-        echo "${RED}Erreur.${NC}"
-        pause
-        return
-    fi
-
-    if [ -f "$TARGET/composer.json" ]; then
-        read -p "Installer composer ? (o/n) " dc
-        [[ "$dc" == "o" ]] && ensure_installed "composer" "composer" && run_sudo bash -c "cd $TARGET && export COMPOSER_ALLOW_SUPERUSER=1; composer install --no-interaction --optimize-autoloader"
-    fi
-
-    run_sudo chown -R www-data:www-data "$TARGET"
-    run_sudo chmod -R 755 "$TARGET"
-
-    read -p "Créer Vhost ? (o/n) " cv
-    [[ "$cv" == "o" ]] && create_vhost_wizard
-    pause
-}
-
-multi_select_backup() {
-    local T="$1"
-    local L="$2"
-    [ ! -d "$T" ] && return
-
-    run_sudo mkdir -p "$BACKUP_DIR"
-    shopt -s nullglob
-    local I=("$T"/*)
-    shopt -u nullglob
-    [ ${#I[@]} -eq 0 ] && return
-
-    declare -A S
-    for i in "${!I[@]}"; do S[$i]=0; done
-
-    while true; do
-        clear; echo -e "${BLUE}BACKUP : $L${NC}"
-        for i in "${!I[@]}"; do
-            [ "${S[$i]}" -eq 1 ] && M="${GREEN}[x]${NC}" || M="${RED}[ ]${NC}"
-            printf "  %s %2d. %s\n" "$M" $((i+1)) "$(basename "${I[$i]}")"
-        done
-
-        echo "  G. Go | T. Tout | N. Rien | r. Retour"
-        read -r -p "> " c
-
-        [[ "$c" == "r" ]] && break
-        [[ "$c" =~ [Tt] ]] && { for i in "${!I[@]}"; do S[$i]=1; done; continue; }
-        [[ "$c" =~ [Nn] ]] && { for i in "${!I[@]}"; do S[$i]=0; done; continue; }
-
-        if [[ "$c" =~ [Gg] ]]; then
-            F=""
-            H=0
-            for i in "${!I[@]}"; do
-                [ "${S[$i]}" -eq 1 ] && { F="$F $(basename "${I[$i]}")"; H=1; }
-            done
-
-            [ $H -eq 0 ] && continue
-            D=$(date +%Y%m%d_%H%M%S)
-            A="backup_${L}_$D.tar.gz"
-            echo "Zip..."
-            run_sudo bash -c "cd $T && tar -czf $BACKUP_DIR/$A $F"
-            echo "OK: $A"
-            pause
-            break
-        fi
-
-        [[ "$c" =~ ^[0-9]+$ ]] && [ "$c" -ge 1 ] && [ "$c" -le ${#I[@]} ] && { idx=$((c-1)); [ "${S[$idx]}" -eq 0 ] && S[$idx]=1 || S[$idx]=0; }
-    done
-}
-
+deploy_from_github() { echo "Obsolète. Utilisez 'Créer un Site'."; pause; }
 backup_menu() {
     while true; do
-        clear; echo -e "${BLUE}=== 💾 SAUVEGARDES ===${NC}"
-        echo -e "  1. Complète | 2. Config Nginx | 3. Data Web | 4. Vhosts | 5. Voir | 6. Restaurer Vhost | r. Retour"
+        clear; echo -e "${BLUE}=== BACKUP ===${NC}"
+        ls -lh "$BACKUP_DIR" 2>/dev/null | grep "tar.gz"
+        echo "1. Backup Full Nginx | 0. Retour"
         read -r -p "> " c
-        D=$(date +%Y%m%d_%H%M%S)
-
-        case "$c" in
-            1)
-                if ask_sudo_gui; then
-                    run_sudo mkdir -p "$BACKUP_DIR"
-                    run_sudo tar -czf "$BACKUP_DIR/FULL_SERVER_$D.tar.gz" "$NGINX_HOME" "$DIR_WEB"
-                    echo "OK"
-                    pause
-                fi
-                ;;
-            2)
-                if ask_sudo_gui; then
-                    run_sudo mkdir -p "$BACKUP_DIR"
-                    run_sudo tar -czf "$BACKUP_DIR/NGINX_CONF_$D.tar.gz" "$NGINX_HOME"
-                    echo "OK"
-                    pause
-                fi
-                ;;
-            3) multi_select_backup "$DIR_WEB" "WebData" ;;
-            4) multi_select_backup "$SITES_AVAIL" "Vhosts" ;;
-            5) ls -lh "$BACKUP_DIR" 2>/dev/null; pause ;;
-            6)
-                shopt -s nullglob
-                files=("$BACKUP_DIR"/deleted_vhost_*.tar.gz)
-                shopt -u nullglob
-
-                if [ ${#files[@]} -eq 0 ]; then
-                    echo "Rien."
-                    pause
-                    continue
-                fi
-
-                for i in "${!files[@]}"; do
-                    echo "$((i+1)). $(basename "${files[$i]}")"
-                done
-
-                read -p "Num > " n
-                if [[ "$n" =~ ^[0-9]+$ ]]; then
-                    sel="${files[$((n-1))]}"
-                    run_sudo tar -xzf "$sel" -C "$SITES_AVAIL" && echo "Restauré" && pause
-                fi
-                ;;
-            r) break ;;
-        esac
+        if [ "$c" == "1" ] && ask_sudo_gui; then
+            run_sudo mkdir -p "$BACKUP_DIR"
+            run_sudo tar -czf "$BACKUP_DIR/NGINX_FULL_$(date +%Y%m%d).tar.gz" "$NGINX_HOME" "$DIR_WEB"
+            echo "Backup créé."; pause
+        elif [ "$c" == "0" ]; then return; fi
     done
 }
-
-logs_menu() {
-    while true; do
-        clear
-        echo "1. Access | 2. Error | r. Retour"
-        read -r -p "> " c
-        case "$c" in
-            1) run_sudo tail -f "$LOG_ACCESS" ;;
-            2) run_sudo tail -f "$LOG_ERROR" ;;
-            r) return ;;
-        esac
-    done
-}
-
-menu_system_update() {
-    if ask_sudo_gui; then
-        sudo apt update && sudo apt upgrade -y
-        pause
-    fi
-}
-
-open_user_shell() {
-    if ! ask_sudo_gui; then return; fi
-    echo -e "\n${GREEN}🔓 Accès autorisé.${NC}"
-    trap - SIGINT SIGQUIT SIGTSTP
-    export SKIP_KIOSK=1
-    cd "$NGINX_HOME" || cd "$HOME"
-    bash --login
-    unset SKIP_KIOSK
-    trap '' SIGINT SIGQUIT SIGTSTP
-}
-
-spawn_restricted_shell() {
-    local TD="$1"
-    local SN="$2"
-    [ ! -d "$TD" ] && run_sudo mkdir -p "$TD"
-
-    echo -e "\n${GREEN}🔒 JAIL $SN${NC}"
-    local OH="$HOME"
-
-    bash --rcfile <(echo "export HOME='$TD'; export PS1='(Restreint:$SN) \[\033[01;34m\]\w\[\033[00m\]\\$ '; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n${RED}⛔ Interdit.${NC}\"; cd \"$TD\"; fi; }; alias cd='check_path; cd'; export PROMPT_COMMAND='check_path'; export PATH='/usr/local/bin:/usr/bin:/bin'")
-
-    export HOME="$OH"
-    trap '' SIGINT SIGQUIT SIGTSTP
-}
-
-# --- 4. BOUCLE PRINCIPALE ---
-SEP="${BLUE}------------------------------------------------${NC}"
-SEP_RED="${RED}------------------------------------------------${NC}"
 
 while true; do
-    clear
-    get_sys_info
-
-    # STATUS CHECK DANS LA BOUCLE
-    if systemctl is-active --quiet $SERVICE_NAME; then
-        SX="${GREEN}● ON${NC}"
-    else
-        SX="${RED}● OFF${NC}"
-    fi
-
-    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
-        FW="${GREEN}● ACTIF${NC}"
-    else
-        FW="${RED}● INACTIF${NC}"
-    fi
-
-    # --- EN-TÊTE AVEC CADRE BLEU ---
+    clear; ensure_requirements; get_sys_info
+    
     echo -e "${BLUE}################################################${NC}"
     echo -e "${BLUE}#           MANAGER SERVEUR WEB                #${NC}"
     echo -e "${BLUE}################################################${NC}"
 
-    # --- INFOS SYSTÈME ---
-    printf "  🖥️  %-21s | ⏱️  %s\n" "${CYAN}$OS_NAME${NC}" "${GREY}$SYS_UPTIME${NC}"
-    printf "  🧠 CPU: %-15s | 💾 RAM: %s\n" "${YELLOW}$CPU_USAGE${NC}" "${YELLOW}$RAM_USAGE${NC}"
+    printf "  🖥️  %-21s | ⏱️  (System)\n" "${CYAN}$OS_NAME${NC}"
     printf "  🏠 LAN: %-15s | 🌍 WAN: %s\n" "${YELLOW}$LOCAL_IP${NC}" "${YELLOW}$PUBLIC_IP${NC}"
-
     echo -e "$SEP"
-
-    # --- INFO SERVICE ---
     printf "  🔌 Service : %-12b | 🛡️  Pare-feu : %s\n" "$SX" "$FW"
     printf "  ℹ️  Version : %-12s | ⚓ Ports    : %s/%s\n" "${CYAN}$APP_VER${NC}" "${YELLOW}80${NC}" "${YELLOW}443${NC}"
-
     echo -e "$SEP"
 
-    # --- MENU : SERVICE ---
     echo -e " ${BOLD}${CYAN}⚡ GESTION DU SERVICE${NC}"
     echo -e "    ${GREEN}1.${NC} ▶️  Démarrer le service"
     echo -e "    ${GREEN}2.${NC} ⏹️  Arrêter le service"
     echo -e "    ${GREEN}3.${NC} 🔄 Redémarrer le service"
     echo -e "    ${GREEN}4.${NC} 📜 Logs du service"
     echo ""
-
-    # --- MENU : SITES & DEPLOIEMENT ---
     echo -e " ${BOLD}${CYAN}🌐 SITES & DÉPLOIEMENT${NC}"
-    echo -e "    ${GREEN}5.${NC} 🌐 Sites Web (VHosts)"
-    echo -e "    ${GREEN}6.${NC} 🐙 Déployer via GitHub"
+    echo -e "    ${GREEN}5.${NC} 🌐 Gestion des Sites Web (Ajout/Suppr)"
+    echo -e "    ${GREEN}6.${NC} 🐙 Déployer via GitHub (Obsolète -> Voir 5)"
     echo ""
-
-    # --- MENU : OUTILS & SECURITE ---
     echo -e " ${BOLD}${CYAN}🛡️  SÉCURITÉ & MAINTENANCE${NC}"
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
     echo -e "    ${GREEN}8.${NC} 🔒 Shell Restreint (Jail)"
     echo -e "    ${GREEN}9.${NC} 💾 Sauvegardes"
     echo -e "    ${GREEN}10.${NC}🚀 Mises à jour Système"
-
     echo -e "$SEP_RED"
-
-    # --- MENU : SYSTÈME (Danger) ---
     echo -e " ${BOLD}${RED}💀 ZONES SYSTÈME${NC}"
     echo -e "    ${RED}11.${NC}🔌 Éteindre le serveur"
     echo -e "    ${RED}12.${NC}♻️  Redémarrer le serveur"
-
     echo -e "$SEP"
-
-    # --- PIED DE PAGE ---
-    echo -e "  [${YELLOW}admin${NC}] 💻 Console Admin   |   [${RED}exit${NC}] 🚪 Quitter"
+    echo -e "  [${RED}exit${NC}] 🚪 Quitter"
     echo -e "$SEP"
 
     read -r -p "  Votre choix > " ch
 
     case "$ch" in
-        1) if ask_sudo_gui; then run_sudo systemctl start nginx; echo "OK"; pause; fi ;;
-        2) if ask_sudo_gui; then run_sudo systemctl stop nginx; echo "OK"; pause; fi ;;
-        3) if ask_sudo_gui; then run_sudo systemctl restart nginx; echo "OK"; pause; fi ;;
-        4) logs_menu ;;
+        1) ask_sudo_gui && run_sudo systemctl start nginx; pause ;;
+        2) ask_sudo_gui && run_sudo systemctl stop nginx; pause ;;
+        3) ask_sudo_gui && run_sudo systemctl restart nginx; pause ;;
+        4) run_sudo tail -f "$LOG_ERROR" ;;
         5) manage_nginx_sites_menu ;;
-        6) deploy_from_github ;;
         7) firewall_manager ;;
-        8)
-           echo "1. WEB | 2. NGINX | 3. PHP"
-           read -p "> " j
-           [ "$j" == "1" ] && spawn_restricted_shell "$DIR_WEB" "WEB"
-           [ "$j" == "2" ] && spawn_restricted_shell "$NGINX_HOME" "NGINX"
-           [ "$j" == "3" ] && spawn_restricted_shell "$DIR_PHP" "PHP"
-           ;;
         9) backup_menu ;;
-        10) menu_system_update ;;
-        11) server_power_action "ÉTEINDRE" "poweroff" ;;
-        12) server_power_action "REDÉMARRER" "reboot" ;;
-        admin) open_user_shell ;;
-        exit) kill -9 $PPID 2>/dev/null; exit 0 ;;
+        10) ask_sudo_gui && sudo apt update && sudo apt upgrade -y; pause ;;
+        11) ask_sudo_gui && sudo poweroff ;;
+        12) ask_sudo_gui && sudo reboot ;;
+        exit|q) exit 0 ;;
         *) echo "Choix invalide"; sleep 1 ;;
     esac
 done
