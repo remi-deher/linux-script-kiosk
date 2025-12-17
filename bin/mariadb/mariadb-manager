@@ -644,7 +644,7 @@ while true; do
     # --- MENU : OUTILS ---
     echo -e " ${BOLD}${CYAN}🛠️  OUTILS & SYSTÈME${NC}"
     echo -e "    ${GREEN}5.${NC} 🧱 Pare-feu (UFW) & Réseau"
-    echo -e "    ${GREEN}6.${NC} 📂 Explorateur Fichiers (Jails)"
+    echo -e "    ${GREEN}6.${NC} 🔒 Shell Restreint (Jail)"
     echo -e "    ${GREEN}7.${NC} 🚀 Mises à jour Système (OS)"
 
     echo -e "$SEP_RED"
