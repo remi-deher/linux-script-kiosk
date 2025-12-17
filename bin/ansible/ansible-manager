@@ -1,33 +1,39 @@
 #!/bin/bash
-# ====================
+# ===============================
 #  MANAGER ANSIBLE
-# ====================
+# ===============================
 
 # --- SÉCURITÉ ---
 trap '' SIGINT SIGQUIT SIGTSTP
 
 # =======================================================
-# CONFIGURATION & PERSISTANCE
+# CONFIGURATION
 # =======================================================
 
 if [ -z "$ANSIBLE_HOME" ]; then export ANSIBLE_HOME="$HOME/ansible"; fi
+# Résolution du lien symbolique dès le départ pour la sécurité
 export ANSIBLE_ROOT=$(readlink -f "$ANSIBLE_HOME")
 export ANSIBLE_CONFIG="$ANSIBLE_ROOT/ansible.cfg"
 CONFIG_FILE="$ANSIBLE_ROOT/.manager_config"
 
+# Chargement config persistante
 if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
 
-# Défauts
+# Valeurs par défaut
 if [ -z "$BACKUP_DIR" ]; then export BACKUP_DIR="/var/backups/ansible_manager"; fi
 if [ -z "$CRON_USER" ]; then export CRON_USER="root"; fi
 
-# Chemins
+# Chemins internes
 PLAYBOOKS_DIR="$ANSIBLE_ROOT/playbooks"
 ROLES_DIR="$ANSIBLE_ROOT/roles"
 DESC_FILE="$PLAYBOOKS_DIR/.descriptions"
 VAULT_PASS_FILE="$ANSIBLE_ROOT/.vault_pass"
+CMD_UFW="/usr/sbin/ufw"
 
-# Couleurs & Design
+# Création structure
+mkdir -p "$PLAYBOOKS_DIR" "$ROLES_DIR"
+
+# Couleurs
 BLUE=$'\033[0;34m'
 GREEN=$'\033[0;32m'
 RED=$'\033[0;31m'
@@ -39,13 +45,23 @@ BOLD=$'\033[1m'
 SEP="${BLUE}------------------------------------------------${NC}"
 SEP_RED="${RED}------------------------------------------------${NC}"
 
-mkdir -p "$PLAYBOOKS_DIR" "$ROLES_DIR"
-
 # =======================================================
-# UTILITAIRES
+# FONCTIONS SYSTÈME
 # =======================================================
 
-pause() { echo ""; read -p "Entrée pour continuer..."; }
+pause() {
+    echo ""
+    read -p "Appuyez sur Entrée pour continuer..."
+}
+
+_check_gitignore() {
+    cd "$ANSIBLE_ROOT" || return
+    if [ ! -f ".gitignore" ]; then touch ".gitignore"; fi
+    if ! grep -q ".manager_config" ".gitignore"; then echo ".manager_config" >> ".gitignore"; fi
+    if ! grep -q ".ansible.cfg" ".gitignore"; then echo ".ansible.cfg" >> ".gitignore"; fi
+    if ! grep -q ".vault_pass" ".gitignore"; then echo ".vault_pass" >> ".gitignore"; fi
+    if ! grep -q "keys/" ".gitignore"; then echo "keys/" >> ".gitignore"; fi
+}
 
 save_config() {
     echo "BACKUP_DIR=\"$BACKUP_DIR\"" > "$CONFIG_FILE"
@@ -53,42 +69,65 @@ save_config() {
     _check_gitignore
 }
 
-_check_gitignore() {
-    cd "$ANSIBLE_ROOT" || return
-    if [ ! -f ".gitignore" ]; then touch ".gitignore"; fi
-    if ! grep -q ".manager_config" ".gitignore"; then echo ".manager_config" >> ".gitignore"; fi
-}
-
 ask_sudo_gui() {
-    # Tente une élévation silencieuse (cache ou NOPASSWD global)
-    if sudo -n true 2>/dev/null; then return 0; fi
-    
-    echo -e "\n${YELLOW}🔒 Authentification requise pour cette action${NC}"
-    read -s -p "Mot de passe : " user_pass; echo ""
+    if sudo -n true 2>/dev/null; then
+        return 0
+    fi
+    echo -e "\n${YELLOW}🔒 Authentification requise${NC}"
+    read -s -p "Mot de passe Sudo : " user_pass
+    echo ""
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Mot de passe incorrect.${NC}"; pause; return 1; fi
+    if [ $? -eq 0 ]; then
+        return 0
+    else
+        echo -e "${RED}❌ Incorrect.${NC}"
+        pause
+        return 1
+    fi
 }
 
-run_as_root() { 
-    # Force l'authentification avant d'exécuter la commande sensible
-    if ask_sudo_gui; then sudo "$@"; return $?; fi; return 1; 
+run_sudo() {
+    if sudo -n true 2>/dev/null; then
+        sudo "$@"
+        return $?
+    fi
+    if ! ask_sudo_gui; then
+        return 1
+    fi
+    sudo "$@"
 }
 
-# --- INFO SYSTÈME ---
+run_sudo_silent() {
+    if sudo -n "$@" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# --- INFOS SYSTÈME ---
 get_sys_info() {
     LOCAL_IP=$(hostname -I | awk '{print $1}')
     PUBLIC_IP=$(curl -s -4 -m 1 https://icanhazip.com 2>/dev/null)
     [[ ! "$PUBLIC_IP" =~ ^[0-9.]+$ ]] && PUBLIC_IP="N/A"
+    
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
+    
     CPU_USAGE=$(top -bn1 | grep "Cpu(s)" | sed "s/.*, *\([0-9.]*\)%* id.*/\1/" | awk '{print 100 - $1"%"}' 2>/dev/null)
     [ -z "$CPU_USAGE" ] && CPU_USAGE="N/A"
+    
     RAM_USAGE=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
     SYS_UPTIME=$(uptime -p | sed 's/up //;s/ hours/h/;s/ minutes/m/;s/ days/j/')
     APP_VER=$(ansible --version 2>/dev/null | head -n1 | awk '{print $NF}' | tr -d ']')
 
     if systemctl is-active --quiet cron; then SX="${GREEN}● ACTIF${NC}"; else SX="${RED}● OFF${NC}"; fi
-    if systemctl is-active --quiet ufw; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
+    
+    # Check UFW status without blocking
+    if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "Status: active"; then
+        FW="${GREEN}● ACTIF${NC}"
+    else
+        FW="${RED}● INACTIF${NC}"
+    fi
 
     cd "$ANSIBLE_ROOT" || return
     if [ -d ".git" ]; then
@@ -97,6 +136,7 @@ get_sys_info() {
 
     if [ -d "$BACKUP_DIR" ]; then ST_BKP="${GREEN}✅ Configuré${NC}"; else ST_BKP="${RED}🔴 Non Config${NC}"; fi
 
+    # Check Cron Logs readability
     if [ -r /var/log/syslog ]; then
         if tail -n 50 /var/log/syslog | grep -qi "CRON.*error\|CRON.*exit status [1-9]"; then
             ST_CRON="${RED}⚠️  Erreurs${NC}"
@@ -108,7 +148,11 @@ ensure_git() {
     if ! command -v git &> /dev/null; then
         echo -e "${YELLOW}Git n'est pas installé.${NC}"
         read -p "L'installer ? (o/n) " i
-        if [ "$i" == "o" ]; then run_as_root apt update && run_as_root apt install -y git; else return 1; fi
+        if [ "$i" == "o" ]; then
+             if ask_sudo_gui; then
+                 run_sudo apt update && run_sudo apt install -y git
+             fi
+        else return 1; fi
     fi
     _check_gitignore
     return 0
@@ -193,7 +237,7 @@ module_launcher() {
 
         mapfile -t files < <(find "$PLAYBOOKS_DIR" -maxdepth 1 -name "*.yml" -printf "%f\n" | sort)
         if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun playbook trouvé.${NC}"; echo -e "$SEP"; else
-            local i=0
+            local i=1
             for f in "${files[@]}"; do
                 printf "  ${GREEN}[%d]${NC} %-30s ${GREY}%s${NC}\n" "$i" "${f:0:30}" "$(_get_desc "$f")"
                 ((i++))
@@ -206,8 +250,10 @@ module_launcher() {
         read -p "  Numéro du playbook > " idx
         if [ "$idx" == "0" ]; then return; fi
         
-        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -lt "${#files[@]}" ]; then
-            sel="${files[$idx]}"
+        real_idx=$((idx-1))
+        
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$real_idx" -lt "${#files[@]}" ] && [ "$real_idx" -ge 0 ]; then
+            sel="${files[$real_idx]}"
             echo -e "\n${CYAN}🚀 Lancement de : $sel${NC}"
             echo -e "${GREY}----------------------------------------${NC}"
             ansible-playbook "$PLAYBOOKS_DIR/$sel"
@@ -225,13 +271,13 @@ module_backup_git() {
 
     _run_backup_local() {
         if [ ! -d "$BACKUP_DIR" ]; then return 1; fi
-        if ! sudo touch "$BACKUP_DIR/.chk" 2>/dev/null; then return 1; fi
-        sudo rm "$BACKUP_DIR/.chk"
+        if ! run_sudo touch "$BACKUP_DIR/.chk" 2>/dev/null; then return 1; fi
+        run_sudo rm "$BACKUP_DIR/.chk"
         D=$(date +%Y%m%d_%H%M%S)
         FILE="$BACKUP_DIR/ansible_backup_$D.tar.gz"
         echo -e "${GREY}[Local] Compression...${NC}"
         if tar --exclude='.git' --exclude='*.retry' -czf "/tmp/ansible_temp.tar.gz" . 2>/dev/null; then
-            if sudo mv "/tmp/ansible_temp.tar.gz" "$FILE"; then
+            if run_sudo mv "/tmp/ansible_temp.tar.gz" "$FILE"; then
                 echo -e "${GREEN}✅ Sauvegarde locale OK : $(basename "$FILE")${NC}"; return 0
             fi
         fi
@@ -267,8 +313,6 @@ module_backup_git() {
             echo -e "${BLUE}################################################${NC}"
             echo -e "${BLUE}#            PARAMÈTRES & CONFIG               #${NC}"
             echo -e "${BLUE}################################################${NC}"
-            echo -e "${GREY}Gérez ici les chemins et la connexion GitHub.${NC}"
-            echo -e "$SEP"
             
             curr_remote=$(git remote get-url origin 2>/dev/null || echo "${RED}Non défini${NC}")
             curr_user=$(git config user.name || echo "${RED}Inconnu${NC}")
@@ -291,31 +335,26 @@ module_backup_git() {
                     read -p "Nouveau chemin absolu : " new_path
                     if [[ "$new_path" == /* ]]; then
                         if ask_sudo_gui; then
-                            sudo mkdir -p "$new_path"
-                            if sudo touch "$new_path/.test" 2>/dev/null; then
-                                sudo rm "$new_path/.test"
-                                export BACKUP_DIR="$new_path"
-                                save_config
-                                echo -e "${GREEN}✅ Enregistré.${NC}"
-                            else echo -e "${RED}❌ Permission refusée.${NC}"; fi
+                            run_sudo mkdir -p "$new_path"
+                            export BACKUP_DIR="$new_path"
+                            save_config
+                            echo -e "${GREEN}✅ Enregistré.${NC}"
                         fi
                     else echo -e "${RED}Chemin invalide.${NC}"; fi
                     pause
                     ;;
                 2)
-                    echo -e "\n${CYAN}--- URL GIT ---${NC}"
-                    read -p "URL (https/ssh) : " u
+                    read -p "URL Git : " u
                     if [ -n "$u" ]; then
                         if git remote get-url origin >/dev/null 2>&1; then git remote set-url origin "$u"; else git remote add origin "$u"; fi
-                        echo -e "${GREEN}✅ Remote mis à jour.${NC}"
+                        echo -e "${GREEN}✅ OK.${NC}"
                     fi
                     pause
                     ;;
                 3)
-                    echo -e "\n${CYAN}--- IDENTITÉ ---${NC}"
                     read -p "Nom : " n; read -p "Email : " e
                     git config user.name "$n"; git config user.email "$e"
-                    echo -e "${GREEN}✅ Identité enregistrée.${NC}"
+                    echo -e "${GREEN}✅ OK.${NC}"
                     pause
                     ;;
                 0) return ;;
@@ -357,12 +396,7 @@ module_backup_git() {
     _lazygit_mode() {
         if ! command -v lazygit &>/dev/null; then
              echo -e "${YELLOW}Lazygit introuvable.${NC}"
-             read -p "Installer ? (o/n) " i
-             if [ "$i" == "o" ] && ask_sudo_gui; then
-                 v=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
-                 curl -Lo lz.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${v}_Linux_x86_64.tar.gz"
-                 tar xf lz.tar.gz lazygit; sudo install lazygit /usr/local/bin; rm lz.tar.gz lazygit
-             else return; fi
+             pause; return
         fi
         trap - SIGINT SIGQUIT SIGTSTP; lazygit; trap '' SIGINT SIGQUIT SIGTSTP
     }
@@ -409,12 +443,10 @@ module_backup_git() {
         echo -e "    ${GREEN}2.${NC} ☁️  Synchroniser Git (Push rapide)"
         echo -e "    ${GREEN}3.${NC} ⬇️  Mise à jour Git (Pull)"
         echo ""
-        
         echo -e " ${BOLD}${CYAN}⚙️  CONFIGURATION${NC}"
         echo -e "    ${GREEN}4.${NC} 🔧 Configurer (Chemins, Remote, etc.)"
         echo -e "    ${GREEN}5.${NC} 🐢 Terminal Avancé (Lazygit)"
         echo -e "    ${YELLOW}6.${NC} 🔙 Rollback / Annuler"
-        
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour au menu principal"
         echo -e "$SEP"
@@ -433,41 +465,185 @@ module_backup_git() {
 }
 
 # =======================================================
-# MODULE 4 : VAULT
+# MODULE 4 : SECRETS & CONFIG PROJET
 # =======================================================
-module_vault() {
+module_project_config() {
     export EDITOR="nano"
-    if [ ! -f "$VAULT_PASS_FILE" ]; then 
-        echo -e "${RED}Erreur : .vault_pass manquant.${NC}"; pause; return
-    fi
     
+    cd "$ANSIBLE_ROOT" || return
+    _check_gitignore
+
+    _manage_vault_pass() {
+        echo -e "\n${CYAN}--- GESTION MOT DE PASSE VAULT ---${NC}"
+        if [ -f "$VAULT_PASS_FILE" ]; then
+            echo -e "État : ${GREEN}Présent${NC}"
+            echo "1. Voir le mot de passe"
+            echo "2. Modifier le mot de passe"
+            read -p "> " vp_choice
+            case "$vp_choice" in
+                1) cat "$VAULT_PASS_FILE"; echo ""; pause ;;
+                2) read -s -p "Nouveau mot de passe : " new_pass
+                   echo "$new_pass" > "$VAULT_PASS_FILE"
+                   echo -e "\n${GREEN}Modifié.${NC}"; pause ;;
+            esac
+        else
+            echo -e "État : ${RED}Absent${NC}"
+            read -p "Créer le fichier .vault_pass ? (o/n) " c
+            if [ "$c" == "o" ]; then
+                read -s -p "Mot de passe : " new_pass
+                echo "$new_pass" > "$VAULT_PASS_FILE"
+                _check_gitignore
+                echo -e "\n${GREEN}Fichier créé.${NC}"; pause
+            fi
+        fi
+    }
+
+    _manage_ansible_cfg() {
+        echo -e "\n${CYAN}--- CONFIGURATION ANSIBLE.CFG ---${NC}"
+        local cfg="$ANSIBLE_ROOT/ansible.cfg"
+        local bkp="$ANSIBLE_ROOT/.ansible.cfg"
+        if [ ! -f "$cfg" ]; then
+            echo -e "${YELLOW}Fichier inexistant.${NC}"
+            read -p "Créer un fichier par défaut ? (o/n) " c
+            if [ "$c" == "o" ]; then
+                echo -e "[defaults]\ninventory = ./inventory\nroles_path = ./roles\nhost_key_checking = False" > "$cfg"
+                echo -e "${GREEN}Fichier créé.${NC}"
+            else return; fi
+        fi
+        echo -e "Fichier actuel : $cfg"
+        read -p "Voulez-vous l'éditer ? (o/n) " ed
+        if [ "$ed" == "o" ]; then
+            cp "$cfg" "$bkp"; _check_gitignore; nano "$cfg"
+            echo -e "${GREEN}Édition terminée. Backup créé dans .ansible.cfg${NC}"
+        fi
+    }
+
+    # RESTAURATION AVEC DIFF
+    _restore_ansible_cfg() {
+        local cfg="$ANSIBLE_ROOT/ansible.cfg"
+        local bkp="$ANSIBLE_ROOT/.ansible.cfg"
+        echo -e "\n${RED}⚠️  RESTAURATION ANSIBLE.CFG${NC}"
+        if [ ! -f "$bkp" ]; then
+            echo -e "${RED}Aucune sauvegarde (.ansible.cfg) trouvée.${NC}"; pause; return
+        fi
+        
+        echo -e "${YELLOW}COMPARAISON AVANT RESTAURATION :${NC}"
+        echo -e "  ${RED}- Ligne actuelle (Va disparaître)${NC}"
+        echo -e "  ${GREEN}+ Ligne de sauvegarde (Va être restaurée)${NC}"
+        echo -e "$SEP"
+        
+        # Affichage du diff
+        if command -v diff > /dev/null; then
+            diff -u --color=always "$cfg" "$bkp" 2>/dev/null || diff -u "$cfg" "$bkp"
+        else
+            echo -e "${GREY}(Commande diff introuvable, impossible de comparer)${NC}"
+        fi
+        
+        echo -e "$SEP"
+        read -p "Écraser la config actuelle par la sauvegarde ? (o/n) " c
+        if [ "$c" == "o" ]; then
+            cp "$bkp" "$cfg"
+            echo -e "${GREEN}✅ Configuration restaurée.${NC}"; pause
+        fi
+    }
+
+    _select_vault_file() {
+        local mode="$1"
+        local prompt="$2"
+        mapfile -t files < <(find "$ANSIBLE_ROOT" -type f \( -name "*.yml" -o -name "*.yaml" -o -name "pass" \) -not -path '*/.*' | sort)
+
+        if [ ${#files[@]} -eq 0 ]; then echo -e "${RED}Aucun fichier trouvé.${NC}"; return 1; fi
+
+        echo -e "${BLUE}--- $prompt ---${NC}"
+        local i=1
+        local valid_files=()
+        
+        for f in "${files[@]}"; do
+            is_locked=false
+            if head -n 1 "$f" | grep -q "\$ANSIBLE_VAULT"; then is_locked=true; fi
+            if [[ "$mode" == "OPEN" && "$is_locked" == "true" ]]; then continue; fi
+            if [[ "$mode" == "LOCKED" && "$is_locked" == "false" ]]; then continue; fi
+            
+            valid_files+=("$f")
+            if [ "$is_locked" == "true" ]; then status="${RED}[🔒 LOCKED]${NC}"; else status="${GREEN}[🔓 OPEN]${NC}"; fi
+            rel_path="${f#$ANSIBLE_ROOT/}"
+            
+            # Affichage "dossier/fichier"
+            dir_name=$(dirname "$rel_path")
+            base_name=$(basename "$rel_path")
+            if [ "$dir_name" == "." ]; then display_path="$base_name"; else display_path="${GREY}${dir_name}/${NC}${base_name}"; fi
+            
+            printf "  [${GREEN}%d${NC}] %-50b %b\n" "$i" "$display_path" "$status"
+            ((i++))
+        done
+        
+        if [ ${#valid_files[@]} -eq 0 ]; then echo -e "${YELLOW}Aucun fichier correspondant.${NC}"; return 1; fi
+
+        echo -e "  [${RED}0${NC}] Annuler"
+        read -p "  Numéro > " idx
+        if [ "$idx" == "0" ]; then return 1; fi
+        
+        real_idx=$((idx-1))
+        if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$real_idx" -lt "${#valid_files[@]}" ] && [ "$real_idx" -ge 0 ]; then
+            SELECTED_VAULT_FILE="${valid_files[$real_idx]}"
+            return 0
+        fi
+        return 1
+    }
+
     while true; do
         clear
         echo -e "${BLUE}################################################${NC}"
-        echo -e "${BLUE}#           GESTION DES SECRETS (VAULT)        #${NC}"
+        echo -e "${BLUE}#         SECRETS & CONFIGURATION PROJET       #${NC}"
         echo -e "${BLUE}################################################${NC}"
-        echo -e "${GREY}Chiffrez vos variables sensibles (mots de passe, clés).${NC}"
+        echo -e "${GREY}Gérez vos mots de passe et la config Ansible.${NC}"
         echo -e "$SEP"
-        echo -e "  ${GREEN}1.${NC} 🔒 Chiffrer un fichier (Encrypt)"
-        echo -e "  ${GREEN}2.${NC} 🔓 Déchiffrer un fichier (Decrypt)"
-        echo -e "  ${GREEN}3.${NC} 📝 Éditer un fichier chiffré (Edit)"
-        echo -e "  ${GREEN}4.${NC} 👀 Voir un fichier chiffré (View)"
+        
+        if [ -f "$VAULT_PASS_FILE" ]; then VP="${GREEN}OK${NC}"; else VP="${RED}Manquant${NC}"; fi
+        if [ -f "ansible.cfg" ]; then AC="${GREEN}Présent${NC}"; else AC="${YELLOW}Défaut${NC}"; fi
+        
+        printf "  🔑 .vault_pass : %-20b | ⚙️  ansible.cfg : %s\n" "$VP" "$AC"
+        echo -e "$SEP"
+
+        echo -e " ${BOLD}${CYAN}🔧 CONFIGURATION${NC}"
+        echo -e "    ${GREEN}1.${NC} 🔑 Gérer le mot de passe (.vault_pass)"
+        echo -e "    ${GREEN}2.${NC} ⚙️  Éditer ansible.cfg (Backup auto)"
+        echo -e "    ${YELLOW}3.${NC} 🔙 Restaurer ansible.cfg (Rollback)"
+        echo ""
+        
+        echo -e " ${BOLD}${CYAN}🔐 ACTIONS VAULT (CHIFFREMENT)${NC}"
+        if [ ! -f "$VAULT_PASS_FILE" ]; then
+            echo -e "    ${RED}⚠️  Créez d'abord le fichier .vault_pass (Option 1)${NC}"
+        else
+            echo -e "    ${GREEN}4.${NC} 🔒 Chiffrer (Liste uniquement les fichiers CLAIRS)"
+            echo -e "    ${GREEN}5.${NC} 🔓 Déchiffrer (Liste uniquement les fichiers CHIFFRÉS)"
+            echo -e "    ${GREEN}6.${NC} 📝 Éditer (Liste uniquement les fichiers CHIFFRÉS)"
+            echo -e "    ${GREEN}7.${NC} 👀 Voir (Liste uniquement les fichiers CHIFFRÉS)"
+        fi
+        
         echo -e "$SEP_RED"
         echo -e "  ${RED}0.${NC} Retour"
         echo -e "$SEP"
         
         read -p "  Choix > " c
         if [ "$c" == "0" ]; then return; fi
-        
-        read -e -p "  Chemin du fichier (Tab) : " f
-        if [ -z "$f" ]; then continue; fi
-        if [ ! -f "$f" ]; then echo "Introuvable."; pause; continue; fi
 
         case $c in
-            1) ansible-vault encrypt "$f"; pause ;;
-            2) ansible-vault decrypt "$f"; pause ;;
-            3) ansible-vault edit "$f"; ;;
-            4) ansible-vault view "$f" | less ;;
+            1) _manage_vault_pass ;;
+            2) _manage_ansible_cfg ;;
+            3) _restore_ansible_cfg ;;
+            4|5|6|7)
+                if [ ! -f "$VAULT_PASS_FILE" ]; then continue; fi
+                if [ "$c" == "4" ]; then mode="OPEN"; else mode="LOCKED"; fi
+                if ! _select_vault_file "$mode" "SÉLECTION FICHIER"; then continue; fi
+                f="$SELECTED_VAULT_FILE"
+                case $c in
+                    4) ansible-vault encrypt "$f"; pause ;;
+                    5) ansible-vault decrypt "$f"; pause ;;
+                    6) ansible-vault edit "$f"; ;;
+                    7) ansible-vault view "$f" | less ;;
+                esac
+                ;;
         esac
     done
 }
@@ -504,7 +680,7 @@ module_inventory() {
 }
 
 # =======================================================
-# MODULE 6 : CRON (Monitor)
+# MODULE 6 : CRON
 # =======================================================
 module_cron() {
     if ! ask_sudo_gui; then return; fi
@@ -549,18 +725,17 @@ module_cron() {
 }
 
 # =======================================================
-# MODULE 7 : PARE-FEU (UFW) - NOPASSWD Support
+# MODULE 7 : PARE-FEU (UFW)
 # =======================================================
 module_firewall() {
-    # Pas de blocage global ici pour autoriser le status sans MDP
     while true; do
         clear
         echo -e "${BLUE}################################################${NC}"
         echo -e "${BLUE}#             PARE-FEU (UFW)                   #${NC}"
         echo -e "${BLUE}################################################${NC}"
         
-        # Affichage (Utilise NOPASSWD si dispo, sinon demandera)
-        sudo ufw status numbered
+        # Statut sans blocage (si sudo NOPASSWD configuré)
+        run_sudo_silent ufw status numbered || run_sudo ufw status numbered
         
         echo -e "$SEP"
         echo -e "  ${GREEN}1.${NC} ➕ Ouvrir un Port (Allow)"
@@ -572,20 +747,39 @@ module_firewall() {
         
         read -p "  Choix > " c
         case $c in
-            1) read -p "Port (ex: 80/tcp) : " p; run_as_root ufw allow "$p"; pause ;;
-            2) read -p "Numéro de règle : " n; run_as_root ufw delete "$n"; pause ;;
-            3) run_as_root ufw reload; pause ;;
+            1) read -p "Port (ex: 80/tcp) : " p; run_sudo ufw allow "$p"; pause ;;
+            2) read -p "Numéro de règle : " n; run_sudo ufw delete "$n"; pause ;;
+            3) run_sudo ufw reload; pause ;;
             0) return ;;
         esac
     done
 }
 
 # =======================================================
-# AUTRES OUTILS SIMPLES
+# MODULE 8 : JAIL / SHELL RESTREINT 
 # =======================================================
 module_jail() {
-    echo -e "${GREEN}Jail ($ANSIBLE_ROOT)${NC}"; bash --rcfile <(echo "PS1='(Jail) \w\$ '; cd $ANSIBLE_ROOT")
+    local TD="$ANSIBLE_ROOT"
+    local SN="Ansible"
+    [ ! -d "$TD" ] && mkdir -p "$TD"
+
+    echo -e "\n${GREEN}🔒 JAIL ACTIVÉE : $SN${NC}"
+    echo -e "${GREY}Périmètre : $TD${NC}"
+    
+    # Sauvegarde HOME réel
+    local OH="$HOME"
+
+    # Lance un bash avec un RC temporaire qui force le HOME et vérifie le path
+    bash --rcfile <(echo "export HOME='$TD'; export PS1='\[\033[01;34m\](Jail:$SN) \w \$ \[\033[00m\]'; check_path() { if [[ \"\$PWD\" != \"$TD\"* ]]; then echo -e \"\n\033[0;31m⛔ Sortie interdite.\033[0m\"; cd \"$TD\"; fi; }; export PROMPT_COMMAND='check_path'; cd \"$TD\"")
+
+    # Restauration
+    export HOME="$OH"
+    trap '' SIGINT SIGQUIT SIGTSTP
 }
+
+# =======================================================
+# AUTRES
+# =======================================================
 module_updates() {
     if ask_sudo_gui; then sudo apt update && sudo apt upgrade -y; pause; fi
 }
@@ -599,16 +793,15 @@ open_user_shell() {
 }
 
 # =======================================================
-# MENU PRINCIPAL
+# BOUCLE PRINCIPALE
 # =======================================================
-
 while true; do
     clear
     get_sys_info
     
-    echo -e "${BLUE}###############################${NC}"
-    echo -e "${BLUE}#       ANSIBLE MANAGER       #${NC}"
-    echo -e "${BLUE}###############################${NC}"
+    echo -e "${BLUE}###########################${NC}"
+    echo -e "${BLUE}#       ANSIBLE MANAGER   #${NC}"
+    echo -e "${BLUE}###########################${NC}"
     
     printf "  🖥️  ${CYAN}%-29s${NC} | ⏱️  ${GREY}%s${NC}\n" "$OS_NAME" "$SYS_UPTIME"
     printf "  🧠 CPU: ${YELLOW}%-23s${NC} | 💾 RAM: ${YELLOW}%s${NC}\n" "$CPU_USAGE" "$RAM_USAGE"
@@ -625,7 +818,7 @@ while true; do
     echo -e "    ${GREEN}1.${NC} 🧙 Assistant Création (Rôles/Tasks)"
     echo -e "    ${GREEN}2.${NC} 🚀 Lancer un Playbook"
     echo -e "    ${GREEN}3.${NC} 💎 Centre de Sauvegardes & Git"
-    echo -e "    ${GREEN}4.${NC} 🔐 Gestion des Secrets (Vault)"
+    echo -e "    ${GREEN}4.${NC} 🔐 Secrets & Config Projet (.vault/cfg)"
     echo ""
 
     # Section 2 (Verticale)
@@ -654,16 +847,19 @@ while true; do
         1) module_assistant_dev ;;
         2) module_launcher ;;
         3) module_backup_git ;;
-        4) module_vault ;;
+        4) module_project_config ;;
         5) module_inventory ;;
         6) module_cron ;;
         7) module_firewall ;;
-        8) module_jail ;;
+        8) module_jail ;; # Utilise maintenant la nouvelle fonction jail 
         9) module_updates ;;
         10) module_power "OFF" ;;
         11) module_power "REBOOT" ;;
         admin) open_user_shell ;;
-        exit|q) echo "Bye."; exit 0 ;;
+        exit|q) 
+            # Kill parent process (Exit like Zoraxy Manager) [cite: 113]
+            kill -9 $PPID 2>/dev/null || exit 0
+            ;;
         *) echo "Choix invalide."; sleep 0.5 ;;
     esac
 done
