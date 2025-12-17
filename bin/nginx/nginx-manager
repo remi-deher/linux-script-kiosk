@@ -1,13 +1,24 @@
 #!/bin/bash
-# ================================
+# ====================================
 #  MANAGER SERVEUR WEB
-# ================================
+# ====================================
 
-# --- CONFIGURATION UTILISATEUR ---
-REGISTAR_TOKEN=""
-REGISTAR_DOMAIN_ID=""
-ZORAXY_IP=""
+# --- FICHIER DE SAUVEGARDE DE LA CONFIGURATION ---
+CONFIG_FILE="$HOME/.nginx-manager.conf"
+
+# --- VALEURS PAR DÉFAUT (Si pas de fichier de config) ---
+INFOMANIAK_TOKEN=""
+INFOMANIAK_DOMAIN=""
+ZORAXY_IP="127.0.0.1"
 ZORAXY_PORT="8000"
+
+# --- CHARGEMENT DE LA CONFIGURATION EXTERNE ---
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
+# --- CALCUL DYNAMIQUE URL ---
+ZORAXY_API_URL="http://$ZORAXY_IP:$ZORAXY_PORT"
 
 # --- CONFIGURATION SYSTEME ---
 DIR_WEB="/var/www"
@@ -18,8 +29,7 @@ BACKUP_DIR="/var/backups/nginx-manager"
 LOG_ACCESS="/var/log/nginx/access.log"
 LOG_ERROR="/var/log/nginx/error.log"
 
-# --- CONFIGURATION ZORAXY (LAN) ---
-ZORAXY_API_URL="http://$ZORAXY_IP:$ZORAXY_PORT"
+# --- CONFIGURATION ZORAXY (FICHIERS) ---
 COOKIE_FILE="/tmp/zoraxy_cookie_manager.txt"
 ZORAXY_SERVICE_NAME="zoraxy"
 ZORAXY_ACME_DIR="/etc/zoraxy/conf/certs/acme"
@@ -39,6 +49,86 @@ CYAN=$'\033[0;36m'
 GREY=$'\033[1;30m'
 NC=$'\033[0m'
 BOLD=$'\033[1m'
+SEP="------------------------------------------------"
+SEP_RED="${RED}------------------------------------------------${NC}"
+
+# =======================================================
+#  0. GESTION DE LA CONFIGURATION (NOUVEAU)
+# =======================================================
+
+save_config() {
+    # Sauvegarde des variables dans le fichier utilisateur
+    cat <<EOF > "$CONFIG_FILE"
+# Configuration Nginx Manager - Infomaniak & Zoraxy
+INFOMANIAK_TOKEN="$INFOMANIAK_TOKEN"
+INFOMANIAK_DOMAIN="$INFOMANIAK_DOMAIN"
+ZORAXY_IP="$ZORAXY_IP"
+ZORAXY_PORT="$ZORAXY_PORT"
+EOF
+    chmod 600 "$CONFIG_FILE"
+
+    # Mise à jour immédiate de l'URL en mémoire
+    ZORAXY_API_URL="http://$ZORAXY_IP:$ZORAXY_PORT"
+
+    echo -e "${GREEN}✅ Configuration sauvegardée dans $CONFIG_FILE${NC}"
+    sleep 1
+}
+
+settings_menu() {
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#           RÉGLAGES & CONFIGURATION           #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${GREY}Fichier config : $CONFIG_FILE${NC}"
+        echo ""
+        echo -e "${BOLD}--- INFOMANIAK ---${NC}"
+
+        # Masquage partiel du token
+        if [ -n "$INFOMANIAK_TOKEN" ]; then
+             mask_token="${INFOMANIAK_TOKEN:0:5}....................${INFOMANIAK_TOKEN: -5}"
+        else
+             mask_token="${RED}Non configuré${NC}"
+        fi
+
+        echo -e "1. 🔑 Token API       : $mask_token"
+        echo -e "2. 🌍 Domaine Racine  : ${CYAN}${INFOMANIAK_DOMAIN:-Non configuré}${NC}"
+        echo ""
+        echo -e "${BOLD}--- ZORAXY ---${NC}"
+        echo -e "3. 👽 Adresse IP      : ${CYAN}$ZORAXY_IP${NC}"
+        echo -e "4. 🔌 Port            : ${CYAN}$ZORAXY_PORT${NC}"
+        echo -e "   ℹ️  URL API Actuelle : $ZORAXY_API_URL"
+        echo ""
+        echo -e "0. 🔙 Retour au menu principal"
+        echo -e "$SEP"
+
+        read -p "Modifier l'option > " choice
+        case "$choice" in
+            1)
+                echo -e "\n${YELLOW}Entrez votre Token API Infomaniak :${NC}"
+                read -p "> " input_token
+                [ -n "$input_token" ] && INFOMANIAK_TOKEN="$input_token" && save_config
+                ;;
+            2)
+                echo -e "\n${YELLOW}Entrez votre domaine (ex: google.com) :${NC}"
+                read -p "> " input_domain
+                [ -n "$input_domain" ] && INFOMANIAK_DOMAIN="$input_domain" && save_config
+                ;;
+            3)
+                echo -e "\n${YELLOW}Nouvelle IP Zoraxy (ex: 192.168.1.50) :${NC}"
+                read -p "> " input_ip
+                [ -n "$input_ip" ] && ZORAXY_IP="$input_ip" && save_config
+                ;;
+            4)
+                echo -e "\n${YELLOW}Nouveau Port Zoraxy (ex: 8000) :${NC}"
+                read -p "> " input_port
+                [ -n "$input_port" ] && ZORAXY_PORT="$input_port" && save_config
+                ;;
+            0) return ;;
+            *) echo "Choix invalide"; sleep 1 ;;
+        esac
+    done
+}
 
 # =======================================================
 #  1. FONCTIONS SYSTÈME DE BASE
@@ -50,7 +140,8 @@ ask_sudo_gui() {
     read -s -p "Mot de passe : " user_pass
     echo ""
     echo "$user_pass" | sudo -S -v 2>/dev/null
-    if [ $? -eq 0 ]; then return 0; else echo -e "${RED}❌ Incorrect.${NC}"; pause; return 1; fi
+    if [ $? -eq 0 ]; then return 0;
+    else echo -e "${RED}❌ Incorrect.${NC}"; pause; return 1; fi
 }
 
 run_sudo() {
@@ -85,15 +176,23 @@ get_sys_info() {
     OS_NAME=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release 2>/dev/null | cut -c1-20)
     [ -z "$OS_NAME" ] && OS_NAME="Linux"
     APP_VER=$($CMD_NGINX -v 2>&1 | awk -F/ '{print $2}')
-    
+
     if systemctl is-active --quiet nginx; then SX="${GREEN}● ON${NC}"; else SX="${RED}● OFF${NC}"; fi
     if run_sudo_silent $CMD_UFW status 2>/dev/null | grep -q "active"; then FW="${GREEN}● ACTIF${NC}"; else FW="${RED}● INACTIF${NC}"; fi
 }
 
 normalize_domain_input() {
     local input="$1"
-    local base="$REGISTAR_DOMAIN_ID"
-    input="${input%.}" 
+    local base="$INFOMANIAK_DOMAIN"
+
+    if [ -z "$base" ]; then
+        echo -e "${RED}Domaine non configuré dans les réglages !${NC}"
+        VAL_FQDN="$input"
+        VAL_SUB="$input"
+        return
+    fi
+
+    input="${input%.}"
     if [[ "$input" == *"$base" ]]; then
         VAL_FQDN="$input"
         VAL_SUB="${input%.$base}"
@@ -115,7 +214,7 @@ check_port_free() {
 
 check_zoraxy_health() {
     if curl -s -m 1 "$ZORAXY_API_URL/api/auth/username" >/dev/null; then return 0; fi
-    echo -e "\n${RED}⚠️  ALERTE : Zoraxy ne répond plus !${NC}"
+    echo -e "\n${RED}⚠️  ALERTE : Zoraxy ne répond plus ! ($ZORAXY_API_URL)${NC}"
     echo -e "${YELLOW}🔄 Redémarrage automatique du service...${NC}"
     run_sudo systemctl restart "$ZORAXY_SERVICE_NAME"
     for i in {1..15}; do
@@ -137,6 +236,7 @@ ensure_zoraxy_auth() {
     if check_zoraxy_auth; then return 0; fi
     HOMEPAGE=$(curl -s -L -k -c "$COOKIE_FILE" -b "$COOKIE_FILE" "$ZORAXY_API_URL/" --max-time 2)
     CSRF_TOKEN=$(echo "$HOMEPAGE" | grep -o 'name="zoraxy.csrf.Token" content="[^"]*"' | head -n 1 | sed 's/.*content="//;s/"//')
+
     echo -e "\n${CYAN}🔐 Authentification Zoraxy requise${NC}"
     while true; do
         read -p "Utilisateur Zoraxy : " u
@@ -163,6 +263,7 @@ get_zoraxy_acls() {
 add_zoraxy_host() {
     local domain="$1"; local target="$2"; local acl="$3"
     if ! ensure_zoraxy_auth; then return 1; fi
+
     echo " > Zoraxy: Ajout Proxy $domain -> $target"
     RESPONSE=$(api_req "/api/proxy/add" --data-urlencode "type=host" --data-urlencode "rootname=$domain" --data-urlencode "ep=$target" --data-urlencode "tls=false")
     if echo "$RESPONSE" | grep -q "error"; then echo -e "${RED}❌ Erreur Zoraxy:${NC} $RESPONSE"; check_zoraxy_health; return 1; fi
@@ -178,10 +279,11 @@ request_zoraxy_ssl() {
     echo -e " > Zoraxy: 🔑 Demande SSL (Let's Encrypt)..."
     read -p "Email (Entrée pour admin@$domain) : " ssl_email
     [ -z "$ssl_email" ] && ssl_email="admin@$domain"
-    
+
     RESPONSE=$(api_req "/api/acme/obtainCert" --data-urlencode "domains=$domain" --data-urlencode "filename=$domain" --data-urlencode "email=$ssl_email" --data-urlencode "ca=Let's Encrypt" --data-urlencode "skipTLS=false" --data-urlencode "dns=false")
-    
-    if echo "$RESPONSE" | grep -q "error"; then echo -e "${RED}❌ Erreur Zoraxy:${NC}"; echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE"; else echo -e "${GREEN}✅ Demande envoyée.${NC}"; fi
+
+    if echo "$RESPONSE" | grep -q "error"; then echo -e "${RED}❌ Erreur Zoraxy:${NC}"; echo "$RESPONSE" | jq . 2>/dev/null || echo "$RESPONSE";
+    else echo -e "${GREEN}✅ Demande envoyée.${NC}"; fi
     check_zoraxy_health
 }
 
@@ -207,20 +309,38 @@ delete_zoraxy_cert() {
 
 create_infomaniak_record() {
     local source_sub="$1"; local target="$2"; local record_type="CNAME"
+
+    # Vérification Config
+    if [ -z "$INFOMANIAK_TOKEN" ] || [ -z "$INFOMANIAK_DOMAIN" ]; then
+        echo -e "${RED}❌ Erreur : Config Infomaniak manquante.${NC} Allez dans 'Configuration'."
+        return 1
+    fi
+
     if [[ "$target" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then record_type="A"; echo " > Infomaniak: Détection IP -> Mode 'A'"; else echo " > Infomaniak: Détection Domaine -> Mode 'CNAME'"; fi
+
     echo " > Infomaniak: Création $record_type $source_sub -> $target..."
     JSON_DATA=$(jq -n --arg type "$record_type" --arg source "$source_sub" --arg target "$target" --arg ttl "3600" '{type: $type, source: $source, target: $target, ttl: $ttl|tonumber}')
-    RESPONSE=$(curl -s -X POST "https://api.infomaniak.com/1/domain/$REGISTAR_DOMAIN_ID/dns/record" -H "Authorization: Bearer $REGISTAR_TOKEN" -H "Content-Type: application/json" -d "$JSON_DATA")
+
+    # Appel API Infomaniak
+    RESPONSE=$(curl -s -X POST "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN/dns/record" -H "Authorization: Bearer $INFOMANIAK_TOKEN" -H "Content-Type: application/json" -d "$JSON_DATA")
+
     STATUS=$(echo "$RESPONSE" | jq -r '.result')
     if [ "$STATUS" == "success" ]; then echo -e "${GREEN}✅ DNS créé.${NC}"; return 0; else echo -e "${RED}❌ Erreur Infomaniak:${NC}"; echo "$RESPONSE" | jq -r '.error.description // .'; return 1; fi
 }
 
 delete_infomaniak_record() {
-    local source_sub="$1"; echo " > Infomaniak: Recherche ID pour $source_sub..."
-    RECORD_ID=$(curl -s -X GET "https://api.infomaniak.com/1/domain/$REGISTAR_DOMAIN_ID/dns/record" -H "Authorization: Bearer $REGISTAR_TOKEN" | jq -r --arg src "$source_sub" '.data[] | select(.source==$src) | .id' | head -n 1)
+    local source_sub="$1"
+
+    if [ -z "$INFOMANIAK_TOKEN" ] || [ -z "$INFOMANIAK_DOMAIN" ]; then
+         echo -e "${RED}❌ Config Infomaniak manquante.${NC}"; return 1
+    fi
+
+    echo " > Infomaniak: Recherche ID pour $source_sub..."
+    RECORD_ID=$(curl -s -X GET "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN/dns/record" -H "Authorization: Bearer $INFOMANIAK_TOKEN" | jq -r --arg src "$source_sub" '.data[] | select(.source==$src) | .id' | head -n 1)
+
     if [ -n "$RECORD_ID" ] && [ "$RECORD_ID" != "null" ]; then
         echo " > Infomaniak: Suppression ID $RECORD_ID..."
-        curl -s -X DELETE "https://api.infomaniak.com/1/domain/$REGISTAR_DOMAIN_ID/dns/record/$RECORD_ID" -H "Authorization: Bearer $REGISTAR_TOKEN" > /dev/null
+        curl -s -X DELETE "https://api.infomaniak.com/1/domain/$INFOMANIAK_DOMAIN/dns/record/$RECORD_ID" -H "Authorization: Bearer $INFOMANIAK_TOKEN" > /dev/null
         echo -e "${GREEN}✅ DNS supprimé.${NC}"
     else echo -e "${YELLOW}⚠️  Aucun enregistrement DNS trouvé.${NC}"; fi
 }
@@ -239,7 +359,7 @@ handle_github_setup() {
     echo "Clonage de $github_url..."
     if ! run_sudo git clone "$github_url" "$target_dir"; then echo -e "${RED}❌ Échec Git.${NC}"; return 1; fi
     run_sudo chown -R $USER:www-data "$target_dir"
-    
+
     if [ -f "$target_dir/composer.json" ]; then
         echo -e "\n${CYAN}🐘 composer.json détecté.${NC}"
         if command -v composer &> /dev/null; then cd "$target_dir" && composer install --no-dev --optimize-autoloader
@@ -277,22 +397,23 @@ perform_rollback() {
 
 # --- NOYAU DE DEPLOIEMENT SÉCURISÉ ---
 core_deployment_wizard() {
-    local mode="$1" 
+    local mode="$1"
     RB_FOLDER=0; RB_NGINX=0; RB_UFW=0; RB_DNS=0; RB_ZORAXY=0; RB_PORT=""
+
+    # Check si la config existe
+    if [ -z "$INFOMANIAK_DOMAIN" ]; then
+        echo -e "${RED}⚠️  Domaine non configuré.${NC} Veuillez le configurer dans le menu principal."; pause; return
+    fi
 
     # 1. NOM DE DOMAINE & VALIDATION
     echo -e "\n${BLUE}=== ÉTAPE 1 : DOMAINE & SOURCE ===${NC}"
     while true; do
         read -p "Sous-domaine (ex: 'app') : " raw_input
-        if [[ "$raw_input" =~ ^[a-zA-Z0-9._-]+$ ]]; then
-            break
-        else
-            echo -e "${RED}Caractères invalides. Réessayez.${NC}"
-        fi
+        if [[ "$raw_input" =~ ^[a-zA-Z0-9._-]+$ ]]; then break; else echo -e "${RED}Caractères invalides. Réessayez.${NC}"; fi
     done
     normalize_domain_input "$raw_input"
     echo -e "   -> Domaine complet : ${CYAN}$VAL_FQDN${NC}"
-    
+
     # 2. SOURCE DU CONTENU
     echo -e "\n${YELLOW}Quelle est la source du projet ?${NC}"
     echo "1. Site Vierge (Page par défaut)"
@@ -301,9 +422,7 @@ core_deployment_wizard() {
     source_type="vierge"; github_url=""
     if [ "$src_choice" == "2" ]; then
         source_type="github"
-        while [ -z "$github_url" ]; do
-            read -p "URL du dépôt GitHub : " github_url
-        done
+        while [ -z "$github_url" ]; do read -p "URL du dépôt GitHub : " github_url; done
     fi
 
     # 3. PORT & VALIDATION DISPONIBILITÉ
@@ -315,21 +434,17 @@ core_deployment_wizard() {
                 echo -e "${GREEN}✅ Port $port disponible.${NC}"
                 RB_PORT="$port"
                 break
-            else
-                echo -e "${RED}❌ Port $port déjà utilisé. Choisissez-en un autre.${NC}"
-            fi
-        else
-            echo -e "${RED}Port invalide (1024-65535).${NC}"
-        fi
+            else echo -e "${RED}❌ Port $port déjà utilisé.${NC}"; fi
+        else echo -e "${RED}Port invalide (1024-65535).${NC}"; fi
     done
-    
+
     # 4. CIBLE DNS
-    local default_target="$REGISTAR_DOMAIN_ID"
+    local default_target="$INFOMANIAK_DOMAIN"
     [ "$mode" == "lan" ] && default_target="$LOCAL_IP"
     echo -e "\nCible DNS (Entrée = ${GREEN}$default_target${NC}) :"
     read -p " > " dns_target
     [ -z "$dns_target" ] && dns_target="$default_target"
-    if [[ ! "$dns_target" =~ ^[0-9]+ ]]; then [[ "$dns_target" != *.* ]] && dns_target="${dns_target}.${REGISTAR_DOMAIN_ID}"; fi
+    if [[ ! "$dns_target" =~ ^[0-9]+ ]]; then [[ "$dns_target" != *.* ]] && dns_target="${dns_target}.${INFOMANIAK_DOMAIN}"; fi
     [[ "$dns_target" == "$VAL_FQDN" ]] && dns_target="$default_target"
 
     # 5. ACL ZORAXY
@@ -339,7 +454,8 @@ core_deployment_wizard() {
         RAW_ACLS=$(get_zoraxy_acls)
         AUTO_ACL_ID=$(echo "$RAW_ACLS" | grep -iE "LAN|Local|Private" | head -n 1 | cut -d'|' -f1)
         AUTO_ACL_NAME=$(echo "$RAW_ACLS" | grep -iE "LAN|Local|Private" | head -n 1 | cut -d'|' -f2)
-        if [ -n "$AUTO_ACL_ID" ]; then SELECTED_ACL_ID="$AUTO_ACL_ID"; SELECTED_ACL_NAME="$AUTO_ACL_NAME"; echo -e "✅ ACL Automatique : ${GREEN}$SELECTED_ACL_NAME${NC}"; else
+        if [ -n "$AUTO_ACL_ID" ]; then SELECTED_ACL_ID="$AUTO_ACL_ID"; SELECTED_ACL_NAME="$AUTO_ACL_NAME"; echo -e "✅ ACL Automatique : ${GREEN}$SELECTED_ACL_NAME${NC}";
+        else
             echo -e "${YELLOW}⚠️  Choisissez l'ACL :${NC}"
             declare -a ACL_IDS; declare -a ACL_NAMES; local i=1
             while IFS='|' read -r id name; do
@@ -363,17 +479,17 @@ core_deployment_wizard() {
     echo -e "${YELLOW}║${NC} Accès      : $mode ($SELECTED_ACL_NAME)"
     echo -e "${YELLOW}║${NC} SSL        : $ssl_choice"
     echo -e "${YELLOW}╚════════════════════════════════════════════════════════════════╝${NC}"
-    
+
     read -p "Confirmer le déploiement ? (o/n) : " c; if [ "$c" != "o" ]; then return; fi
 
     # --- EXECUTION ---
-    
+
     echo -e "\n${BOLD}[1/6] Installation du contenu...${NC}"
     if ! ask_sudo_gui; then return; fi
-    
+
     docroot="$DIR_WEB/$VAL_FQDN"
     if [ ! -d "$docroot" ]; then run_sudo mkdir -p "$docroot"; RB_FOLDER=1; fi
-    
+
     WEB_ROOT_SUFFIX=""
     if [ "$source_type" == "github" ]; then
         handle_github_setup "$docroot" "$github_url"
@@ -387,7 +503,7 @@ core_deployment_wizard() {
     echo -e "\n${BOLD}[2/6] Configuration Nginx...${NC}"
     conf="$SITES_AVAIL/$VAL_FQDN.conf"
     if [ -f "$conf" ]; then echo -e "${YELLOW}⚠️  Fichier conf existant écrasé.${NC}"; fi
-    
+
     cat <<EOF | run_sudo tee "$conf" > /dev/null
 server {
     listen $port;
@@ -407,7 +523,7 @@ EOF
     echo -e "${BOLD}[3/6] Firewall...${NC}"; run_sudo ufw allow "$port/tcp" >/dev/null; RB_UFW=1
     echo -e "${BOLD}[4/6] DNS...${NC}"; create_infomaniak_record "$VAL_SUB" "$dns_target"; if [ $? -ne 0 ]; then perform_rollback; return; fi; RB_DNS=1
     echo -e "${BOLD}[5/6] Zoraxy...${NC}"; add_zoraxy_host "$VAL_FQDN" "$LOCAL_IP:$port" "$SELECTED_ACL_ID"; if [ $? -ne 0 ]; then perform_rollback; return; fi; RB_ZORAXY=1
-    
+
     if [[ "$ssl_choice" == "o" || "$ssl_choice" == "O" || "$ssl_choice" == "y" ]]; then
         echo -e "${BOLD}[6/6] SSL...${NC}"; request_zoraxy_ssl "$VAL_FQDN"
     else echo -e "${BOLD}[6/6] SSL ignoré.${NC}"; fi
@@ -426,20 +542,20 @@ wizard_new_site_menu() {
     echo "Quel type d'accès souhaitez-vous ?"
     echo ""
     echo -e "${GREEN}1. 🌍 SITE PUBLIC (INTERNET)${NC}"
-    echo -e "   ${GREY}Exemple : blog.grandepharmaciebonaparte.fr${NC}"
+    echo -e "   ${GREY}Exemple : blog.monsite.fr${NC}"
     echo -e "   ${GREY}ℹ️  Accessible depuis 4G/Extérieur. Sécurisé par Zoraxy.${NC}"
     echo ""
     echo -e "${YELLOW}2. 🏠 SITE PRIVÉ (RÉSEAU LOCAL)${NC}"
-    echo -e "   ${GREY}Exemple : nas.grandepharmaciebonaparte.fr${NC}"
-    echo -e "   ${GREY}ℹ️  Accessible UNIQUEMENT depuis le réseau de la pharmacie.${NC}"
+    echo -e "   ${GREY}Exemple : nas.monsite.fr${NC}"
+    echo -e "   ${GREY}ℹ️  Accessible UNIQUEMENT depuis le réseau local.${NC}"
     echo ""
     echo -e "${RED}0. Retour${NC}"
-    
+
     read -p "Votre choix > " access_type
-    
+
     case "$access_type" in
         1) core_deployment_wizard "public" ;;
-        2) 
+        2)
             echo -e "\n${YELLOW}--- Options Site Privé ---${NC}"
             echo "1. Avec Nom de Domaine (Recommandé)"
             echo "2. Par IP Directe (Simple)"
@@ -454,7 +570,7 @@ create_simple_vhost_wizard() {
     echo -e "\n${GREEN}➕ SITE SIMPLE (IP:PORT)${NC}"
     echo "Ce site sera accessible via http://$LOCAL_IP:PORT"
     read -p "Nom du projet : " d; [ -z "$d" ] && return
-    
+
     # Check port
     while true; do
         read -p "Port : " port
@@ -462,7 +578,11 @@ create_simple_vhost_wizard() {
     done
 
     if ! ask_sudo_gui; then return; fi
-    setup_site_content "$DIR_WEB/$d" "Local"
+    # Note: setup_site_content was missing in original script source, using generic creation
+    run_sudo mkdir -p "$DIR_WEB/$d"
+    echo "<h1>Site Local $d</h1>" | run_sudo tee "$DIR_WEB/$d/index.html" >/dev/null
+    run_sudo chown -R www-data:www-data "$DIR_WEB/$d"
+
     conf="$SITES_AVAIL/$d.conf"
     cat <<EOF | run_sudo tee "$conf" > /dev/null
 server {
@@ -507,174 +627,154 @@ action_ssl_retry() {
 }
 
 action_cleanup_ssl() {
-    echo -e "\n${BLUE}### NETTOYAGE CERTIFICATS ###${NC}"
+    echo -e "\n${BLUE}### NETTOYAGE CERTIFICATS (ZORAXY) ###${NC}"
     if ! ensure_zoraxy_auth; then return; fi
     echo "Analyse en cours..."
-    
-    # LISTING
-    ACTIVE_HOSTS=$(api_req "/api/proxy/list" --data-urlencode "type=host" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)"')
-    CERTS=$(api_req "/api/cert/list" | jq -r '.[]')
-    
-    declare -a CERT_FILES; declare -a CERT_STATUS_TXT; declare -a CERT_LINKS_TXT; declare -a CERT_COLOR; declare -a SELECTED; idx=0
-    
-    # 1. Calcul largeur Max
-    MAX_LEN=20
-    for cert in $CERTS; do
-        len=${#cert}; if (( len > MAX_LEN )); then MAX_LEN=$len; fi
-    done
-    MAX_LEN=$((MAX_LEN + 2)) 
 
-    # 2. Remplissage
-    for cert in $CERTS; do
+    # Récupération de la liste des certificats (API retourne les noms sans extensions)
+    # On utilise jq -r pour avoir une liste propre
+    CERTS_RAW=$(api_req "/api/cert/list" | jq -r 'if type=="array" then .[] else keys[] end')
+
+    # Récupération des hôtes actifs pour comparer
+    ACTIVE_HOSTS=$(api_req "/api/proxy/list" --data-urlencode "type=host" | jq -r 'to_entries[] | "\(.value.RootOrMatchingDomain)"')
+
+    if [ -z "$CERTS_RAW" ]; then echo "Aucun certificat trouvé."; pause; return; fi
+
+    declare -a CERT_FILES; declare -a CERT_STATUS_TXT; declare -a CERT_LINKS_TXT; declare -a CERT_COLOR; declare -a SELECTED; idx=0
+
+    # Mise en forme du tableau
+    MAX_LEN=20
+    for cert in $CERTS_RAW; do len=${#cert}; if (( len > MAX_LEN )); then MAX_LEN=$len; fi; done
+    MAX_LEN=$((MAX_LEN + 2))
+
+    for cert in $CERTS_RAW; do
+        # On nettoie au cas où, mais l'API Zoraxy semble renvoyer le nom pur
         cert_name="${cert%.pem}"; cert_name="${cert_name%.crt}"
-        [[ "$cert_name" == "server" || "$cert_name" == "ca" ]] && continue
-        
-        CERT_FILES[$idx]="$cert"; is_used=0; linked_host="-"
-        
-        if echo "$ACTIVE_HOSTS" | grep -qx "$cert_name"; then is_used=1; linked_host="$cert_name";
-        else
-            if [[ "$cert_name" == *"_"* || "$cert_name" == *"wildcard"* ]]; then is_used=1; linked_host="Wildcard (Secu)"; fi
+        [[ "$cert_name" == "server" || "$cert_name" == "ca" || "$cert_name" == "null" ]] && continue
+
+        CERT_FILES[$idx]="$cert_name"
+        is_used=0
+        linked_host="-"
+
+        if echo "$ACTIVE_HOSTS" | grep -qx "$cert_name"; then
+            is_used=1; linked_host="$cert_name"
+        elif [[ "$cert_name" == *"_"* || "$cert_name" == *"wildcard"* ]]; then
+            is_used=1; linked_host="Wildcard/Autre"
         fi
-        
-        if [ $is_used -eq 1 ]; then 
+
+        if [ $is_used -eq 1 ]; then
             CERT_STATUS_TXT[$idx]="UTILISÉ"; CERT_COLOR[$idx]=$GREEN; CERT_LINKS_TXT[$idx]="$linked_host"; SELECTED[$idx]=0
-        else 
+        else
             CERT_STATUS_TXT[$idx]="ORPHELIN"; CERT_COLOR[$idx]=$RED; CERT_LINKS_TXT[$idx]="Aucun"; SELECTED[$idx]=1
         fi
         ((idx++))
     done
-    if [ $idx -eq 0 ]; then echo "Aucun certificat."; pause; return; fi
 
-    # 3. Affichage ALIGNÉ (Couleurs hors du formatage de largeur)
+    # Boucle d'affichage
     while true; do
-        clear; echo -e "${BLUE}=== GESTION SSL ===${NC}"
-        # Header Dynamique avec la largeur calculée
-        printf "%-4s %-5s %-${MAX_LEN}s %-15s %-30s\n" "N°" "DEL" "CERTIFICAT" "ÉTAT" "SITE LIÉ"
+        clear; echo -e "${BLUE}=== GESTION SSL (Zoraxy) ===${NC}"
+        printf "%-4s %-5s %-${MAX_LEN}s %-15s %-30s\n" "N°" "DEL" "DOMAINE" "ÉTAT" "SITE LIÉ"
         echo "--------------------------------------------------------------------------------"
         for ((i=0; i<idx; i++)); do
-            if [ "${SELECTED[$i]}" -eq 1 ]; then
-                t_mark="[X]"
-                c_mark="$RED"
-            else
-                t_mark="[ ]"
-                c_mark="" # Pas de couleur = blanc/défaut
-            fi
-            
-            # Utilisation de %b pour les couleurs autour des chaînes pour ne pas casser l'alignement
+            if [ "${SELECTED[$i]}" -eq 1 ]; then t_mark="[X]"; c_mark="$RED"; else t_mark="[ ]"; c_mark=""; fi
             printf "%-4s %b%-5s%b %-${MAX_LEN}s %b%-15s%b %b%-30s%b\n" \
-                "$((i+1))" \
-                "$c_mark" "$t_mark" "$NC" \
-                "${CERT_FILES[$i]}" \
-                "${CERT_COLOR[$i]}" "${CERT_STATUS_TXT[$i]}" "$NC" \
-                "$GREY" "${CERT_LINKS_TXT[$i]}" "$NC"
+                "$((i+1))" "$c_mark" "$t_mark" "$NC" "${CERT_FILES[$i]}" "${CERT_COLOR[$i]}" "${CERT_STATUS_TXT[$i]}" "$NC" "$GREY" "${CERT_LINKS_TXT[$i]}" "$NC"
         done
-        echo -e "\n [N°] Cocher/Décocher | [v] Valider | [0] Annuler"
+        echo -e "\n [N°] Cocher/Décocher | [v] Valider suppression | [0] Annuler"
         read -p "> " input
+
         if [ "$input" == "0" ]; then return; fi
         if [ "$input" == "v" ]; then break; fi
         if [[ "$input" =~ ^[0-9]+$ ]] && [ "$input" -ge 1 ] && [ "$input" -le "$idx" ]; then
             r=$((input-1)); if [ "${SELECTED[$r]}" -eq 1 ]; then SELECTED[$r]=0; else SELECTED[$r]=1; fi
         fi
     done
-    
+
+    # Exécution de la suppression
     count=0
+    echo ""
     for ((i=0; i<idx; i++)); do
         if [ "${SELECTED[$i]}" -eq 1 ]; then
-            echo -n "Suppression ${CERT_FILES[$i]}... "
-            api_req "/api/cert/delete" --data-urlencode "file=${CERT_FILES[$i]}" > /dev/null
+            domain_to_del="${CERT_FILES[$i]}"
+            echo -n "Suppression de $domain_to_del... "
+
+            # --- CORRECTION ICI : Paramètre 'domain' ---
+            api_req "/api/cert/delete" -X POST --data-urlencode "domain=$domain_to_del" > /dev/null
+
             echo "OK"
             ((count++))
         fi
     done
-    echo -e "${GREEN}$count certificats supprimés.${NC}"
-    check_zoraxy_health; pause
+    echo -e "${GREEN}$count certificats supprimés.${NC}"; check_zoraxy_health; pause
 }
 
 action_delete_wizard() {
     refresh_dashboard_table; read -p "Site # à SUPPRIMER (0=Retour) : " sel; [ "$sel" == "0" ] && return
-    
+
     f="${VHOST_FILES[$((sel-1))]}"; filename=$(basename "$f")
     content=$(sudo cat "$f" 2>/dev/null)
     domain_conf=$(echo "$content" | grep "server_name" | awk '{print $2}' | sed 's/;//')
     if [ "$domain_conf" == "_" ]; then domain_conf="${filename%.*}"; fi
     target_port=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | head -n1)
     normalize_domain_input "$domain_conf"
-    
+
     echo -e "\n${RED}${BOLD}🗑️  SUPPRESSION DE : $domain_conf${NC}"
     echo "Analyse des ressources associées..."
-    
-    # 1. Check Dossier Web
+
     d_web="NON"
     if [ -d "$DIR_WEB/$domain_conf" ]; then d_web="${RED}OUI ($DIR_WEB/$domain_conf)${NC}"; has_web=1; else d_web="${GREEN}NON${NC}"; has_web=0; fi
-    
-    # 2. Check Proxy Zoraxy
-    d_proxy="NON"
-    has_proxy=0
+
+    d_proxy="NON"; has_proxy=0
     if check_zoraxy_health; then
-        if api_req "/api/proxy/list" --data-urlencode "type=host" | grep -q "$VAL_FQDN"; then
-            d_proxy="${RED}OUI (Proxy Actif)${NC}"; has_proxy=1
-        else
-            d_proxy="${GREEN}NON${NC}"
-        fi
+        if api_req "/api/proxy/list" --data-urlencode "type=host" | grep -q "$VAL_FQDN"; then d_proxy="${RED}OUI (Proxy Actif)${NC}"; has_proxy=1; else d_proxy="${GREEN}NON${NC}"; fi
     fi
-    
-    # 3. Check Certificat SSL
-    d_cert="NON"
-    has_cert=0
+
+    d_cert="NON"; has_cert=0
     if check_zoraxy_health; then
-        if api_req "/api/cert/list" | grep -q "$VAL_FQDN"; then
-            d_cert="${RED}OUI (Certificat trouvé)${NC}"; has_cert=1
-        else
-            d_cert="${GREEN}NON${NC}"
-        fi
+        if api_req "/api/cert/list" | grep -q "$VAL_FQDN"; then d_cert="${RED}OUI (Certificat trouvé)${NC}"; has_cert=1; else d_cert="${GREEN}NON${NC}"; fi
     fi
-    
-    # RESUME DU SCAN
+
     echo -e "\n${YELLOW}Ressources trouvées :${NC}"
     echo -e " - Config Nginx : ${RED}OUI ($filename)${NC}"
     echo -e " - Dossier Web  : $d_web"
     echo -e " - Proxy Zoraxy : $d_proxy"
     echo -e " - Certificat   : $d_cert"
     echo -e " - Entrée DNS   : ${RED}OUI (Infomaniak)${NC}"
-    
-    # QUESTIONS INTELLIGENTES
+
     echo -e "\n${BOLD}Que voulez-vous faire ?${NC}"
-    
     del_web="n"; del_proxy="n"; del_cert="n"; del_dns="n"
-    
+
     if [ $has_web -eq 1 ]; then read -p " > Supprimer le dossier web ? (o/n) " del_web; fi
     if [ $has_proxy -eq 1 ]; then read -p " > Supprimer le Proxy Zoraxy ? (o/n) " del_proxy; fi
     if [ $has_cert -eq 1 ]; then read -p " > Supprimer le Certificat SSL ? (o/n) " del_cert; fi
     read -p " > Supprimer l'entrée DNS Infomaniak ? (o/n) " del_dns
-    
+
     echo -e "\n${RED}CONFIRMATION FINALE${NC}"
     read -p "Tapez 'oui' pour exécuter la suppression : " confirm
     if [ "$confirm" != "oui" ]; then echo "Annulé."; pause; return; fi
-    
+
     if ! ask_sudo_gui; then return; fi
 
-    # EXECUTION
     echo ""
     if [ "$del_dns" == "o" ]; then delete_infomaniak_record "$VAL_SUB"; fi
     if [ "$del_proxy" == "o" ]; then delete_zoraxy_host "$VAL_FQDN"; fi
-    if [ "$del_cert" == "o" ]; then delete_zoraxy_cert "$VAL_FQDN.pem"; fi # Zoraxy stocke souvent en .pem
-    
+    if [ "$del_cert" == "o" ]; then delete_zoraxy_cert "$VAL_FQDN.pem"; fi
+
     [ -n "$target_port" ] && run_sudo ufw delete allow "$target_port/tcp" >/dev/null
-    
+
     echo "Suppression Nginx..."
     target_link=$(find "$SITES_ENAB" -name "$filename*"); [ -n "$target_link" ] && run_sudo rm "$target_link"
     run_sudo rm "$f"; run_sudo systemctl reload nginx
-    
-    if [ "$del_web" == "o" ]; then 
+
+    if [ "$del_web" == "o" ]; then
         echo "Suppression Dossier..."
         run_sudo rm -rf "$DIR_WEB/$domain_conf"
     fi
-    
     echo -e "${GREEN}Terminé.${NC}"; pause
 }
 
 # =======================================================
-#  6. DASHBOARD & GESTION SITES (TABLEAU UNIFIÉ & ALIGNÉ)
+#  6. DASHBOARD & GESTION SITES
 # =======================================================
 
 declare -a VHOST_FILES
@@ -684,82 +784,126 @@ refresh_dashboard_table() {
     shopt -s nullglob
     local files=("$SITES_AVAIL"/*)
     shopt -u nullglob
-    
-    # Récupération Zoraxy Proxies
+
+    # Récupération plus précise des Proxies Zoraxy
     if check_zoraxy_health; then
+        # On récupère : IP_Cible|Domaine|UseTLS
         Z_PROXIES=$(api_req "/api/proxy/list" --data-urlencode "type=host" | jq -r 'to_entries[] | select(.value | type == "object") | "\(.value.ActiveOrigins[0].OriginIpOrDomain // "null")|\(.value.RootOrMatchingDomain)|\(.value.UseTLS)"')
     else
         Z_PROXIES=""
     fi
-    
-    Z_CERTS=$(api_req "/api/cert/list" | jq -r '.[]')
+
+    # Liste simple des noms de certificats existants
+    Z_CERTS_LIST=$(api_req "/api/cert/list" | jq -r '.[]')
 
     echo -e "${BLUE}=== TABLEAU DE BORD DES SITES WEB ===${NC}"
-    printf "%-3s %-45s %-8s %-40s %-20s\n" "ID" "DOMAINE PUBLIC (ZORAXY)" "PORT" "RACINE WEB" "SSL (ZORAXY)"
+    printf "%-3s %-45s %-8s %-40s %-20s\n" "ID" "DOMAINE PUBLIC (ZORAXY)" "PORT" "RACINE WEB" "ÉTAT SSL"
     echo "-----------------------------------------------------------------------------------------------------------------------"
-    
-    if [ ${#files[@]} -eq 0 ]; then echo "   (Aucun site configuré)"; else
+
+    if [ ${#files[@]} -eq 0 ]; then
+        echo "   (Aucun site configuré)"
+    else
         local i=1
         for f in "${files[@]}"; do
             VHOST_FILES+=("$f")
-            
+
+            # Lecture Config Nginx
             content=$(sudo cat "$f" 2>/dev/null)
             port=$(echo "$content" | grep -E "^\s*listen" | grep -oE "[0-9]+" | head -n1)
             [ -z "$port" ] && port="-"
             root_dir=$(echo "$content" | grep -E "^\s*root" | awk '{print $2}' | sed 's/;//')
-            
-            # Contenu brut (sans couleurs pour l'alignement)
+
+            # Variables par défaut
             zoraxy_host_txt="Non lié"
             ssl_status_txt="-"
-            
-            # Couleurs (à appliquer séparément)
             c_host=$GREY
             c_ssl=$GREY
-            
+
             if [ -n "$port" ] && [ "$port" != "-" ]; then
-                z_match=$(echo "$Z_PROXIES" | grep ":$port|")
+                # Recherche stricte du port dans la liste Zoraxy (évite de confondre 80 et 8080)
+                z_match=$(echo "$Z_PROXIES" | grep -F ":$port|")
+
                 if [ -n "$z_match" ]; then
                     IFS='|' read -r z_origin z_domain z_tls <<< "$z_match"
                     zoraxy_host_txt="$z_domain"
                     c_host=$CYAN
-                    
-                    if [ "$z_tls" == "true" ]; then 
-                        if echo "$Z_CERTS" | grep -q "$z_domain"; then
-                            cert_file="$ZORAXY_ACME_DIR/${z_domain}.pem"
+
+                    # Vérification de la présence physique du certificat
+                    cert_found=0
+                    if echo "$Z_CERTS_LIST" | grep -q "$z_domain"; then
+                        cert_found=1
+                    fi
+
+                    if [ "$z_tls" == "true" ]; then
+                        if [ $cert_found -eq 1 ]; then
+                            # Tentative lecture date expiration
+                            cert_file="$ZORAXY_ACME_DIR/${z_domain}.pem" # ou .crt selon config
                             if sudo [ -f "$cert_file" ]; then
-                                end_date=$(sudo openssl x509 -enddate -noout -in "$cert_file" | cut -d= -f2)
-                                parsed_date=$(date -d "$end_date" +%d/%m/%y 2>/dev/null)
-                                ssl_status_txt="Oui ($parsed_date)"
+                                end_date=$(sudo openssl x509 -enddate -noout -in "$cert_file" 2>/dev/null | cut -d= -f2)
+                                if [ -n "$end_date" ]; then
+                                    parsed_date=$(date -d "$end_date" +%d/%m/%y 2>/dev/null)
+                                    ssl_status_txt="Actif ($parsed_date)"
+                                else
+                                    ssl_status_txt="Actif (Date inconnue)"
+                                fi
                                 c_ssl=$GREEN
                             else
-                                ssl_status_txt="Activé"
-                                c_ssl=$GREEN
+                                ssl_status_txt="Actif (Fichier ?)"
+                                c_ssl=$YELLOW
                             fi
                         else
-                            ssl_status_txt="Activé (No Cert)"
-                            c_ssl=$YELLOW
+                            ssl_status_txt="ON (Mais sans Cert!)"
+                            c_ssl=$RED
                         fi
-                    else 
-                        ssl_status_txt="Désactivé"
-                        c_ssl=$RED
+                    else
+                        # Le cas où Zoraxy a TLS=false, mais le cert existe quand même
+                        if [ $cert_found -eq 1 ]; then
+                            ssl_status_txt="Inactif (Cert Dispo)"
+                            c_ssl=$YELLOW
+                        else
+                            ssl_status_txt="Désactivé"
+                            c_ssl=$GREY
+                        fi
                     fi
                 fi
             fi
 
-            # Troncature pour l'alignement
+            # Formatage pour alignement
             d_dom="${zoraxy_host_txt:0:44}"
             d_root="${root_dir:0:39}"
 
             printf "%-3s %b%-45s%b %-8s %-40s %b%-20s%b\n" \
-                "$i" \
-                "$c_host" "$d_dom" "$NC" \
-                "$port" \
-                "$d_root" \
-                "$c_ssl" "$ssl_status_txt" "$NC"
+                "$i" "$c_host" "$d_dom" "$NC" "$port" "$d_root" "$c_ssl" "$ssl_status_txt" "$NC"
             ((i++))
         done
     fi
     echo "-----------------------------------------------------------------------------------------------------------------------"
+}
+
+menu_ssl_manager() {
+    while true; do
+        clear
+        echo -e "${BLUE}################################################${NC}"
+        echo -e "${BLUE}#         🔐 GESTION DES CERTIFICATS           #${NC}"
+        echo -e "${BLUE}################################################${NC}"
+        echo ""
+        echo -e "  ${GREEN}1.${NC} 🔄 Renouveler / Forcer un certificat"
+        echo -e "     ${GREY}(Utile si un site affiche 'Non sécurisé' ou si le certificat a expiré)${NC}"
+        echo ""
+        echo -e "  ${RED}2.${NC} 🧹 Nettoyer / Supprimer des certificats"
+        echo -e "     ${GREY}(Supprimer les vieux certificats orphelins via une liste)${NC}"
+        echo ""
+        echo -e "  ${RED}0.${NC} Retour"
+        echo ""
+
+        read -p "Votre choix > " c
+        case "$c" in
+            1) action_ssl_retry ;;
+            2) action_cleanup_ssl ;;
+            0) return ;;
+            *) echo "Choix invalide"; sleep 1 ;;
+        esac
+    done
 }
 
 manage_nginx_sites_menu() {
@@ -767,29 +911,26 @@ manage_nginx_sites_menu() {
         clear
         refresh_dashboard_table
         echo ""
-        echo -e " ${BOLD}${CYAN}🚀 DÉPLOIEMENT${NC}"
-        echo -e "   ${GREEN}1.${NC} ✨ Créer un nouveau Site      ${GREY}(Vierge ou GitHub)${NC}"
+        echo -e " ${BOLD}--- ACTIONS ---${NC}"
+        echo -e "  ${GREEN}1.${NC} ➕ Ajouter un site"
+        echo -e "  ${YELLOW}2.${NC} ⏯️  Activer / Désactiver"
+        echo -e "  ${CYAN}3.${NC} 📝 Modifier (Config Nginx)"
+        echo -e "  ${RED}4.${NC} 🗑️  Supprimer"
         echo ""
-        echo -e " ${BOLD}${CYAN}🔧 MAINTENANCE & CONFIG${NC}"
-        echo -e "   ${YELLOW}2.${NC} ⏯️  Activer / Désactiver      ${GREY}(ON/OFF sans suppression)${NC}"
-        echo -e "   ${CYAN}3.${NC} 📝 Éditer Configuration      ${GREY}(Vhost Nginx + Nano)${NC}"
-        echo -e "   ${BLUE}4.${NC} 🔑 Réparer / Forcer SSL      ${GREY}(Renouvellement Zoraxy)${NC}"
-        echo -e "   ${BLUE}8.${NC} 🧹 Nettoyer Certificats      ${GREY}(Sélecteur interactif)${NC}"
-        echo ""
-        echo -e " ${BOLD}${CYAN}🗑️  ZONE DE DANGER${NC}"
-        echo -e "   ${RED}5.${NC} 💥 Supprimer un Site         ${GREY}(Assistant Intelligent)${NC}"
+        echo -e " ${BOLD}--- SÉCURITÉ ---${NC}"
+        echo -e "  ${BLUE}5.${NC} 🔐 Gestion des certificats (Renouveler ou Supprimer)"
         echo ""
         echo -e "  ${RED}0.${NC} 🔙 Retour au Menu Principal"
-        
+
         read -r -p "  Votre choix > " ch
         case "$ch" in
             1) wizard_new_site_menu ;;
             2) action_toggle_vhost ;;
             3) action_edit_vhost ;;
-            4) action_ssl_retry ;;
-            5) action_delete_wizard ;;
-            8) action_cleanup_ssl ;;
+            4) action_delete_wizard ;;
+            5) menu_ssl_manager ;;
             0) break ;;
+            *) echo "Choix invalide"; sleep 1 ;;
         esac
     done
 }
@@ -812,7 +953,6 @@ firewall_manager() {
     done
 }
 
-deploy_from_github() { echo "Obsolète."; pause; }
 backup_menu() {
     while true; do
         clear; echo -e "${BLUE}=== BACKUP ===${NC}"
@@ -829,7 +969,7 @@ backup_menu() {
 
 while true; do
     clear; ensure_requirements; get_sys_info
-    
+
     echo -e "${BLUE}################################################${NC}"
     echo -e "${BLUE}#           MANAGER SERVEUR WEB                #${NC}"
     echo -e "${BLUE}################################################${NC}"
@@ -849,6 +989,7 @@ while true; do
     echo ""
     echo -e " ${BOLD}${CYAN}🌐 SITES & DÉPLOIEMENT${NC}"
     echo -e "    ${GREEN}5.${NC} 🌐 Gestion des Sites Web (Dashboard)"
+    echo -e "    ${GREEN}6.${NC} ⚙️  Configuration (Infomaniak / Zoraxy)"
     echo ""
     echo -e " ${BOLD}${CYAN}🛡️  SÉCURITÉ & MAINTENANCE${NC}"
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
@@ -870,6 +1011,7 @@ while true; do
         3) ask_sudo_gui && run_sudo systemctl restart nginx; pause ;;
         4) run_sudo tail -f "$LOG_ERROR" ;;
         5) manage_nginx_sites_menu ;;
+        6) settings_menu ;;
         7) firewall_manager ;;
         9) backup_menu ;;
         10) ask_sudo_gui && sudo apt update && sudo apt upgrade -y; pause ;;
