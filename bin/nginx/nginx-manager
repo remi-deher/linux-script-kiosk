@@ -645,7 +645,7 @@ while true; do
     # --- MENU : OUTILS & SECURITE ---
     echo -e " ${BOLD}${CYAN}🛡️  SÉCURITÉ & MAINTENANCE${NC}"
     echo -e "    ${GREEN}7.${NC} 🧱 Pare-feu (UFW)"
-    echo -e "    ${GREEN}8.${NC} 📂 Explorateur Fichiers (Jails)"
+    echo -e "    ${GREEN}8.${NC} 🔒 Shell Restreint (Jail)"
     echo -e "    ${GREEN}9.${NC} 💾 Sauvegardes"
     echo -e "    ${GREEN}10.${NC}🚀 Mises à jour Système"
 
