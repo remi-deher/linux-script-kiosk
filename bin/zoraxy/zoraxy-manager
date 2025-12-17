@@ -654,7 +654,7 @@ while true; do
     echo -e "    ${GREEN}4.${NC} 🧱 Pare-Feu (UFW)"
     echo -e "    ${GREEN}5.${NC} 📦 Sauvegardes"
     echo -e "    ${GREEN}6.${NC} 🚀 Mises à jour (App & Système)"
-    echo -e "    ${GREEN}7.${NC} 🔒 Explorateur Fichiers (Jail)"
+    echo -e "    ${GREEN}7.${NC} 🔒 Shell Restreint (Jail)"
 
     echo -e "$SEP_RED"
 
